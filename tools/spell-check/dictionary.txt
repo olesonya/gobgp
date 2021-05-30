@@ -4,10 +4,12 @@ aggregator
 aigp
 aspath
 bgpd
+bsid
 cidr
 distinguisher
 dscp
 ebgp
+enlp
 ethernet
 evpn
 flowspec
@@ -38,6 +40,7 @@ rpki
 sadb
 safi
 srgb
+srlg
 subcode
 syscall
 syslog

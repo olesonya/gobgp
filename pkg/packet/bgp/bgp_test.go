@@ -18,9 +18,13 @@ package bgp
 import (
 	"bytes"
 	"encoding/binary"
+	"io/ioutil"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -82,6 +86,12 @@ func Test_IPAddrPrefixString(t *testing.T) {
 	assert.Equal(t, "3343:faba:3903::/64", ipv6.String())
 	ipv6 = NewIPv6AddrPrefix(63, "3343:faba:3903:129::0")
 	assert.Equal(t, "3343:faba:3903:128::/63", ipv6.String())
+}
+
+func Test_IPAddrDecode(t *testing.T) {
+	r := IPAddrPrefixDefault{}
+	b := make([]byte, 16)
+	r.decodePrefix(b, 33, 4)
 }
 
 func Test_RouteTargetMembershipNLRIString(t *testing.T) {
@@ -667,7 +677,7 @@ func Test_AddPath(t *testing.T) {
 		n1.SetPathLocalIdentifier(20)
 		bits, err := n1.Serialize(opt)
 		assert.Nil(err)
-		n2 := NewLabeledVPNIPAddrPrefix(0, "", MPLSLabelStack{}, nil)
+		n2 := NewLabeledVPNIPv6AddrPrefix(0, "", MPLSLabelStack{}, nil)
 		err = n2.DecodeFromBytes(bits, opt)
 		assert.Nil(err)
 		assert.Equal(n2.PathIdentifier(), uint32(20))
@@ -690,7 +700,7 @@ func Test_AddPath(t *testing.T) {
 		n1.SetPathLocalIdentifier(20)
 		bits, err := n1.Serialize(opt)
 		assert.Nil(err)
-		n2 := NewLabeledIPAddrPrefix(0, "", MPLSLabelStack{})
+		n2 := NewLabeledIPv6AddrPrefix(0, "", MPLSLabelStack{})
 		err = n2.DecodeFromBytes(bits, opt)
 		assert.Nil(err)
 		assert.Equal(n2.PathIdentifier(), uint32(20))
@@ -1185,6 +1195,69 @@ func TestFuzzCrashers(t *testing.T) {
 
 	for _, f := range crashers {
 		ParseBGPMessage([]byte(f))
+	}
+}
+
+func TestParseMessageWithBadLength(t *testing.T) {
+	type testCase struct {
+		fname string
+		data  []byte
+	}
+
+	var cases []testCase
+	root := filepath.Join("testdata", "bad-len")
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if path == root {
+				return nil
+			}
+			return filepath.SkipDir
+		}
+		fname := filepath.Base(path)
+		if strings.ContainsRune(fname, '.') {
+			return nil
+		}
+		data, err := ioutil.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		cases = append(cases, testCase{
+			fname: fname,
+			data:  data,
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.fname, func(t *testing.T) {
+			msg, err := ParseBGPMessage(tt.data)
+			if err == nil {
+				_, err = msg.Serialize()
+				if err != nil {
+					t.Fatal("failed to serialize:", err)
+				}
+				return
+			}
+
+			switch e := err.(type) {
+			case *MessageError:
+				switch e.TypeCode {
+				case BGP_ERROR_MESSAGE_HEADER_ERROR:
+					if e.SubTypeCode != BGP_ERROR_SUB_BAD_MESSAGE_LENGTH {
+						t.Fatalf("got unexpected message type and data: %v", e)
+					}
+				}
+			default:
+				t.Fatalf("got unexpected error type %T: %v", err, err)
+			}
+
+		})
 	}
 }
 
@@ -1763,6 +1836,7 @@ func Test_LsTLVIgpRouterID(t *testing.T) {
 		want string
 		err  bool
 	}{
+		{[]byte{0x02, 0x03, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04}, `{"type":515,"igp_router_id":"[1 2 3 4]"}`, false},
 		{[]byte{0x02, 0x03, 0x00, 0x06, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, `{"type":515,"igp_router_id":"[1 2 3 4 5 6]"}`, false},
 		{[]byte{0x02, 0x03, 0x00, 0x07, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07}, `{"type":515,"igp_router_id":"[1 2 3 4 5 6 7]"}`, false},
 		{[]byte{0x02, 0x03, 0x00, 0x08, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}, `{"type":515,"igp_router_id":"[1 2 3 4 5 6 7 8]"}`, false},

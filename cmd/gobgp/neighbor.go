@@ -113,10 +113,21 @@ func counter(p *api.Peer) (uint64, uint64, uint64, error) {
 }
 
 func showNeighbors(vrf string) error {
-	m, err := getNeighbors("", false)
+	l, err := getNeighbors("", false)
 	if err != nil {
 		return err
 	}
+	m := make([]*api.Peer, 0)
+	if vrf == "" {
+		m = l
+	} else {
+		for _, n := range l {
+			if n.Conf.Vrf == vrf {
+				m = append(m, n)
+			}
+		}
+	}
+
 	if globalOpts.Json {
 		j, _ := json.Marshal(m)
 		fmt.Println(string(j))
@@ -713,7 +724,7 @@ func showValidationInfo(p *api.Path, shownAs map[uint32]struct{}) error {
 
 func showRibInfo(r, name string) error {
 	def := addr2AddressFamily(net.ParseIP(name))
-	if r == cmdGlobal {
+	if r == cmdGlobal || r == cmdVRF {
 		def = ipv4UC
 	}
 	family, err := checkAddressFamily(def)
@@ -731,6 +742,8 @@ func showRibInfo(r, name string) error {
 		t = api.TableType_ADJ_IN
 	case cmdAdjOut:
 		t = api.TableType_ADJ_OUT
+	case cmdVRF:
+		t = api.TableType_VRF
 	default:
 		return fmt.Errorf("invalid resource to show RIB info: %s", r)
 	}

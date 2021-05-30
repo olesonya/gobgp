@@ -1,7 +1,6 @@
 # GoBGP: BGP implementation in Go
 
 [![Build Status](https://travis-ci.org/osrg/gobgp.svg?branch=master)](https://travis-ci.org/osrg/gobgp/builds)
-[![Slack Status](https://slackin-gobgp.now.sh/badge.svg)](https://slackin-gobgp.now.sh/)
 
 GoBGP is an open source BGP implementation designed from scratch for
 modern environment and implemented in a modern programming language,
@@ -36,6 +35,7 @@ Try [a binary release](https://github.com/osrg/gobgp/releases/latest).
 - Go Native BGP Library
   - [Basics](docs/sources/lib.md)
   - [BGP-LS](docs/sources/lib-ls.md)
+  - [SR Policy](docs/sources/lib-srpolicy.md)
 - [Graceful Restart](docs/sources/graceful-restart.md)
 - [Additional Paths](docs/sources/add-paths.md)
 - [Peer Group](docs/sources/peer-group.md)
@@ -52,7 +52,7 @@ Try [a binary release](https://github.com/osrg/gobgp/releases/latest).
 
 ## Community, discussion and support
 
-We have the [Slack](https://slackin-gobgp.now.sh/) for questions, discussion, suggestions, etc.
+We have the [Slack](https://join.slack.com/t/gobgp/shared_invite/zt-g9il5j8i-3gZwnXArK0O9Mnn4Yu~IrQ) for questions, discussion, suggestions, etc.
 
 You have code or documentation for GoBGP? Awesome! Send a pull
 request. No CLA, board members, governance, or other mess. See [`BUILD.md`](BUILD.md) for info on

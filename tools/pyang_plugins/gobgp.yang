@@ -141,6 +141,20 @@ module gobgp {
     reference "draft-ietf-idr-flowspec-l2vpn-03";
   }
 
+  identity IPV4-SRPOLICY {
+    base bgp-types:afi-safi-type;
+    description
+      "SR Policy IPv4 (AFI,SAFI = 1,73)";
+    reference "https://tools.ietf.org/html/draft-ietf-idr-segment-routing-te-policy-11";
+  }
+
+  identity IPV6-SRPOLICY {
+    base bgp-types:afi-safi-type;
+    description
+      "SR Policy IPv6 (AFI,SAFI = 2,73)";
+    reference "https://tools.ietf.org/html/draft-ietf-idr-segment-routing-te-policy-11";
+  }
+
   identity OPAQUE {
     base bgp-types:afi-safi-type;
     description
@@ -1248,7 +1262,7 @@ module gobgp {
       type string;
       description
         "Configure zebra software name.
-        quagga, frr3, frr4, frr5, frr6, frr7 can be used.";
+        frr4, cumulus, frr6, frr7, frr7.2 and frr7.3 can be used.";
     }
   }
 

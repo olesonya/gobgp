@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/eapache/channels"
@@ -52,35 +53,56 @@ func (l *tcpListener) Close() error {
 }
 
 // avoid mapped IPv6 address
-func newTCPListener(address string, port uint32, ch chan *net.TCPConn) (*tcpListener, error) {
+func newTCPListener(address string, port uint32, bindToDev string, ch chan *net.TCPConn) (*tcpListener, error) {
 	proto := "tcp4"
+	family := syscall.AF_INET
 	if ip := net.ParseIP(address); ip == nil {
 		return nil, fmt.Errorf("can't listen on %s", address)
 	} else if ip.To4() == nil {
 		proto = "tcp6"
+		family = syscall.AF_INET6
 	}
-	addr, err := net.ResolveTCPAddr(proto, net.JoinHostPort(address, strconv.Itoa(int(port))))
-	if err != nil {
-		return nil, err
+	addr := net.JoinHostPort(address, strconv.Itoa(int(port)))
+
+	var lc net.ListenConfig
+	lc.Control = func(network, address string, c syscall.RawConn) error {
+		if bindToDev != "" {
+			err := setBindToDevSockopt(c, bindToDev)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"Topic":     "Peer",
+					"Key":       addr,
+					"BindToDev": bindToDev,
+				}).Warnf("failed to bind Listener to device (%s): %s", bindToDev, err)
+				return err
+			}
+		}
+		// Note: Set TTL=255 for incoming connection listener in order to accept
+		// connection in case for the neighbor has TTL Security settings.
+		err := setsockoptIpTtl(c, family, 255)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"Topic": "Peer",
+				"Key":   addr,
+			}).Warnf("cannot set TTL(=%d) for TCPListener: %s", 255, err)
+		}
+		return nil
 	}
 
-	l, err := net.ListenTCP(proto, addr)
+	l, err := lc.Listen(context.Background(), proto, addr)
 	if err != nil {
 		return nil, err
 	}
-	// Note: Set TTL=255 for incoming connection listener in order to accept
-	// connection in case for the neighbor has TTL Security settings.
-	if err := setListenTCPTTLSockopt(l, 255); err != nil {
-		log.WithFields(log.Fields{
-			"Topic": "Peer",
-			"Key":   addr,
-		}).Warnf("cannot set TTL(=%d) for TCPListener: %s", 255, err)
+	listener, ok := l.(*net.TCPListener)
+	if !ok {
+		err = fmt.Errorf("unexpected connection listener (not for TCP)")
+		return nil, err
 	}
 
 	closeCh := make(chan struct{})
 	go func() error {
 		for {
-			conn, err := l.AcceptTCP()
+			conn, err := listener.AcceptTCP()
 			if err != nil {
 				close(closeCh)
 				log.WithFields(log.Fields{
@@ -93,7 +115,7 @@ func newTCPListener(address string, port uint32, ch chan *net.TCPConn) (*tcpList
 		}
 	}()
 	return &tcpListener{
-		l:  l,
+		l:  listener,
 		ch: closeCh,
 	}, nil
 }
@@ -710,7 +732,7 @@ func (s *BgpServer) setPathVrfIdMap(paths []*table.Path, m map[uint32]bool) {
 				}
 			}
 		default:
-			m[zebra.VRF_DEFAULT] = true
+			m[zebra.DefaultVrf] = true
 		}
 	}
 }
@@ -853,8 +875,12 @@ func (s *BgpServer) notifyPostPolicyUpdateWatcher(peer *peer, pathList []*table.
 }
 
 func newWatchEventPeerState(peer *peer, m *fsmMsg) *watchEventPeerState {
-	_, rport := peer.fsm.RemoteHostPort()
-	laddr, lport := peer.fsm.LocalHostPort()
+	var laddr string
+	var rport, lport uint16
+	if peer.fsm.conn != nil {
+		_, rport = peer.fsm.RemoteHostPort()
+		laddr, lport = peer.fsm.LocalHostPort()
+	}
 	sentOpen := buildopen(peer.fsm.gConf, peer.fsm.pConf)
 	peer.fsm.lock.RLock()
 	recvOpen := peer.fsm.recvOpen
@@ -1296,6 +1322,7 @@ func (s *BgpServer) deleteDynamicNeighbor(peer *peer, oldState bgp.FSMState, e *
 	peer.fsm.lock.RUnlock()
 	cleanInfiniteChannel(peer.fsm.outgoingCh)
 	cleanInfiniteChannel(peer.fsm.incomingCh)
+	s.delIncoming(peer.fsm.incomingCh)
 	s.broadcastPeerState(peer, oldState, e)
 }
 
@@ -1769,6 +1796,7 @@ func (s *BgpServer) StopBgp(ctx context.Context, r *api.StopBgpRequest) error {
 
 	if s.shutdownWG != nil {
 		s.shutdownWG.Wait()
+		s.shutdownWG = nil
 	}
 	return nil
 }
@@ -2099,7 +2127,7 @@ func (s *BgpServer) StartBgp(ctx context.Context, r *api.StartBgpRequest) error 
 		if c.Config.Port > 0 {
 			acceptCh := make(chan *net.TCPConn, 4096)
 			for _, addr := range c.Config.LocalAddressList {
-				l, err := newTCPListener(addr, uint32(c.Config.Port), acceptCh)
+				l, err := newTCPListener(addr, uint32(c.Config.Port), g.BindToDevice, acceptCh)
 				if err != nil {
 					return err
 				}
@@ -2520,7 +2548,7 @@ func (s *BgpServer) ListPath(ctx context.Context, r *api.ListPathRequest, fn fun
 			}
 			knownPathList := dst.GetAllKnownPathList()
 			for i, path := range knownPathList {
-				p := toPathApi(path, getValidation(v, path))
+				p := toPathApi(path, getValidation(v, path), r.EnableNlriBinary, r.EnableAttributeBinary)
 				if !table.SelectionOptions.DisableBestPathSelection {
 					if i == 0 {
 						switch r.TableType {
@@ -2568,7 +2596,15 @@ func (s *BgpServer) getRibInfo(addr string, family bgp.RouteFamily) (info *table
 			as = peer.AS()
 			m = s.rsRib
 		}
-		info, err = m.TableInfo(id, as, family)
+
+		af := bgp.RouteFamily(family)
+		tbl, ok := m.Tables[af]
+		if !ok {
+			return fmt.Errorf("address family: %s not supported", af)
+		}
+
+		info = tbl.Info(table.TableInfoOptions{ID: id, AS: as})
+
 		return err
 	}, true)
 	return
@@ -2595,6 +2631,40 @@ func (s *BgpServer) getAdjRibInfo(addr string, family bgp.RouteFamily, in bool) 
 	return
 }
 
+func (s *BgpServer) getVrfRibInfo(name string, family bgp.RouteFamily) (info *table.TableInfo, err error) {
+	err = s.mgmtOperation(func() error {
+		m := s.globalRib
+		vrfs := m.Vrfs
+		if _, ok := vrfs[name]; !ok {
+			return fmt.Errorf("vrf %s not found", name)
+		}
+
+		var af bgp.RouteFamily
+		switch family {
+		case bgp.RF_IPv4_UC:
+			af = bgp.RF_IPv4_VPN
+		case bgp.RF_IPv6_UC:
+			af = bgp.RF_IPv6_VPN
+		case bgp.RF_FS_IPv4_UC:
+			af = bgp.RF_FS_IPv4_VPN
+		case bgp.RF_FS_IPv6_UC:
+			af = bgp.RF_FS_IPv6_VPN
+		case bgp.RF_EVPN:
+			af = bgp.RF_EVPN
+		}
+
+		tbl, ok := m.Tables[af]
+		if !ok {
+			return fmt.Errorf("address family: %s not supported", af)
+		}
+
+		info = tbl.Info(table.TableInfoOptions{VRF: vrfs[name]})
+
+		return err
+	}, true)
+	return
+}
+
 func (s *BgpServer) GetTable(ctx context.Context, r *api.GetTableRequest) (*api.GetTableResponse, error) {
 	if r == nil {
 		return nil, fmt.Errorf("invalid request")
@@ -2614,6 +2684,8 @@ func (s *BgpServer) GetTable(ctx context.Context, r *api.GetTableRequest) (*api.
 		fallthrough
 	case api.TableType_ADJ_OUT:
 		info, err = s.getAdjRibInfo(r.Name, family, in)
+	case api.TableType_VRF:
+		info, err = s.getVrfRibInfo(r.Name, family)
 	default:
 		return nil, fmt.Errorf("unsupported resource type: %s", r.TableType)
 	}
@@ -2645,6 +2717,62 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (*api.GetB
 		return nil
 	}, false)
 	return rsp, nil
+}
+
+func (s *BgpServer) ListDynamicNeighbor(ctx context.Context, r *api.ListDynamicNeighborRequest, fn func(neighbor *api.DynamicNeighbor)) error {
+	toApi := func(dn *config.DynamicNeighbor) *api.DynamicNeighbor {
+		return &api.DynamicNeighbor{
+			Prefix:    dn.Config.Prefix,
+			PeerGroup: dn.Config.PeerGroup,
+		}
+	}
+	var l []*api.DynamicNeighbor
+	s.mgmtOperation(func() error {
+		peerGroupName := r.PeerGroup
+		for k, group := range s.peerGroupMap {
+			if peerGroupName != "" && peerGroupName != k {
+				continue
+			}
+			for _, dn := range group.dynamicNeighbors {
+				l = append(l, toApi(dn))
+			}
+		}
+		return nil
+	}, false)
+	for _, dn := range l {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			fn(dn)
+		}
+	}
+	return nil
+}
+
+func (s *BgpServer) ListPeerGroup(ctx context.Context, r *api.ListPeerGroupRequest, fn func(*api.PeerGroup)) error {
+	var l []*api.PeerGroup
+	s.mgmtOperation(func() error {
+		peerGroupName := r.PeerGroupName
+		l = make([]*api.PeerGroup, 0, len(s.peerGroupMap))
+		for k, group := range s.peerGroupMap {
+			if peerGroupName != "" && peerGroupName != k {
+				continue
+			}
+			pg := config.NewPeerGroupFromConfigStruct(group.Conf)
+			l = append(l, pg)
+		}
+		return nil
+	}, false)
+	for _, pg := range l {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			fn(pg)
+		}
+	}
+	return nil
 }
 
 func (s *BgpServer) ListPeer(ctx context.Context, r *api.ListPeerRequest, fn func(*api.Peer)) error {
@@ -2906,6 +3034,13 @@ func (s *BgpServer) DeletePeer(ctx context.Context, r *api.DeletePeerRequest) er
 			NeighborInterface: r.Interface,
 		}}
 		return s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED)
+	}, true)
+}
+
+func (s *BgpServer) DeleteDynamicNeighbor(ctx context.Context, r *api.DeleteDynamicNeighborRequest) error {
+	return s.mgmtOperation(func() error {
+		s.peerGroupMap[r.PeerGroup].DeleteDynamicNeighbor(r.Prefix)
+		return nil
 	}, true)
 }
 
@@ -3447,9 +3582,6 @@ func (s *BgpServer) ListPolicyAssignment(ctx context.Context, r *api.ListPolicyA
 				if err != nil {
 					return err
 				}
-				if len(policies) == 0 {
-					continue
-				}
 				t := &table.PolicyAssignment{
 					Name:     name,
 					Type:     dir,
@@ -3647,9 +3779,9 @@ func (s *BgpServer) MonitorTable(ctx context.Context, r *api.MonitorTableRequest
 			return s.watch(watchBestPath(r.Current)), nil
 		case api.TableType_ADJ_IN:
 			if r.PostPolicy {
-				return s.watch(watchPostUpdate(r.Current)), nil
+				return s.watch(watchPostUpdate(r.Current, r.Name)), nil
 			}
-			return s.watch(watchUpdate(r.Current)), nil
+			return s.watch(watchUpdate(r.Current, r.Name)), nil
 		default:
 			return nil, fmt.Errorf("unsupported resource type: %v", r.TableType)
 		}
@@ -3689,11 +3821,14 @@ func (s *BgpServer) MonitorTable(ctx context.Context, r *api.MonitorTableRequest
 					if path == nil || (r.Family != nil && family != path.GetRouteFamily()) {
 						continue
 					}
+					if len(r.Name) > 0 && r.Name != path.GetSource().Address.String() {
+						continue
+					}
 					select {
 					case <-ctx.Done():
 						return
 					default:
-						fn(toPathApi(path, nil))
+						fn(toPathApi(path, nil, false, false))
 					}
 				}
 			case <-ctx.Done():
@@ -3710,7 +3845,13 @@ func (s *BgpServer) MonitorPeer(ctx context.Context, r *api.MonitorPeerRequest, 
 	}
 
 	go func() {
-		w := s.watch(watchPeerState(r.Current))
+		// So that both flags are not required, assume that if the
+		// initial_state flag is true, then the caller desires that the initial
+		// state be returned whether or not it is established and regardless of
+		// the value of `current`.
+		current := r.Current || r.InitialState
+		nonEstablished := r.InitialState
+		w := s.watch(watchPeerState(current, nonEstablished))
 		defer func() {
 			w.Stop()
 		}()
@@ -3748,6 +3889,22 @@ func (s *BgpServer) MonitorPeer(ctx context.Context, r *api.MonitorPeerRequest, 
 			}
 		}
 	}()
+	return nil
+}
+
+func (s *BgpServer) SetLogLevel(ctx context.Context, r *api.SetLogLevelRequest) error {
+	prevLevel := log.GetLevel()
+	newLevel := log.Level(r.Level)
+	if prevLevel == newLevel {
+		log.WithFields(log.Fields{
+			"Topic": "Config",
+		}).Infof("Logging level unchanged -- level already set to %v", newLevel)
+	} else {
+		log.SetLevel(newLevel)
+		log.WithFields(log.Fields{
+			"Topic": "Config",
+		}).Infof("Logging level changed -- prev: %v, new: %v", prevLevel, newLevel)
+	}
 	return nil
 }
 
@@ -3835,8 +3992,10 @@ type watchOptions struct {
 	initUpdate     bool
 	initPostUpdate bool
 	initPeerState  bool
+	nonEstablished bool
 	tableName      string
 	recvMessage    bool
+	peerAddress    string
 }
 
 type watchOption func(*watchOptions)
@@ -3850,29 +4009,34 @@ func watchBestPath(current bool) watchOption {
 	}
 }
 
-func watchUpdate(current bool) watchOption {
+func watchUpdate(current bool, peerAddress string) watchOption {
 	return func(o *watchOptions) {
 		o.preUpdate = true
 		if current {
 			o.initUpdate = true
 		}
+		o.peerAddress = peerAddress
 	}
 }
 
-func watchPostUpdate(current bool) watchOption {
+func watchPostUpdate(current bool, peerAddress string) watchOption {
 	return func(o *watchOptions) {
 		o.postUpdate = true
 		if current {
 			o.initPostUpdate = true
 		}
+		o.peerAddress = peerAddress
 	}
 }
 
-func watchPeerState(current bool) watchOption {
+func watchPeerState(current, includeNonEstablished bool) watchOption {
 	return func(o *watchOptions) {
 		o.peerState = true
 		if current {
 			o.initPeerState = true
+			if includeNonEstablished {
+				o.nonEstablished = true
+			}
 		}
 	}
 }
@@ -4027,11 +4191,13 @@ func (s *BgpServer) watch(opts ...watchOption) (w *watcher) {
 		}
 		if w.opts.initPeerState {
 			for _, peer := range s.neighborMap {
-				peer.fsm.lock.RLock()
-				notEstablished := peer.fsm.state != bgp.BGP_FSM_ESTABLISHED
-				peer.fsm.lock.RUnlock()
-				if notEstablished {
-					continue
+				if !w.opts.nonEstablished {
+					peer.fsm.lock.RLock()
+					notEstablished := peer.fsm.state != bgp.BGP_FSM_ESTABLISHED
+					peer.fsm.lock.RUnlock()
+					if notEstablished {
+						continue
+					}
 				}
 				w.notify(newWatchEventPeerState(peer, nil))
 			}
@@ -4046,8 +4212,12 @@ func (s *BgpServer) watch(opts ...watchOption) (w *watcher) {
 			for _, peer := range s.neighborMap {
 				peer.fsm.lock.RLock()
 				notEstablished := peer.fsm.state != bgp.BGP_FSM_ESTABLISHED
+				peerAddress := peer.fsm.peerInfo.Address.String()
 				peer.fsm.lock.RUnlock()
 				if notEstablished {
+					continue
+				}
+				if len(w.opts.peerAddress) > 0 && w.opts.peerAddress != peerAddress {
 					continue
 				}
 				configNeighbor := w.s.toConfig(peer, false)
@@ -4104,8 +4274,12 @@ func (s *BgpServer) watch(opts ...watchOption) (w *watcher) {
 				for peerInfo, paths := range pathsByPeer {
 					// create copy which can be access to without mutex
 					var configNeighbor *config.Neighbor
-					if peer, ok := s.neighborMap[peerInfo.Address.String()]; ok {
+					peerAddress := peerInfo.Address.String()
+					if peer, ok := s.neighborMap[peerAddress]; ok {
 						configNeighbor = w.s.toConfig(peer, false)
+					}
+					if w.opts.peerAddress != "" && w.opts.peerAddress != peerAddress {
+						continue
 					}
 
 					w.notify(&watchEventUpdate{

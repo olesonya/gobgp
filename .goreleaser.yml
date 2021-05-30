@@ -3,12 +3,16 @@
 # Build customization
 env:
   - GO111MODULE=on
+  - CGO_ENABLED=0
 
 builds:
   - id: gobgp
     main: ./cmd/gobgp/
     binary: gobgp
-    ldflags: -s -extldflags "-static"
+    flags:
+      - -a
+      - -tags=netgo
+    ldflags: -s
     goos:
       - linux
     goarch:
@@ -20,7 +24,10 @@ builds:
   - id: gobgpd
     main: ./cmd/gobgpd/
     binary: gobgpd
-    ldflags: -s -extldflags "-static"
+    flags:
+      - -a
+      - -tags=netgo
+    ldflags: -s
     goos:
       - linux
     goarch:

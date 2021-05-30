@@ -115,17 +115,17 @@ func (b *bmpClient) loop() {
 		}
 
 		if func() bool {
-			ops := []watchOption{watchPeerState(true)}
+			ops := []watchOption{watchPeerState(true, false)}
 			if b.c.RouteMonitoringPolicy == config.BMP_ROUTE_MONITORING_POLICY_TYPE_BOTH {
 				log.WithFields(
 					log.Fields{"Topic": "bmp"},
 				).Warn("both option for route-monitoring-policy is obsoleted")
 			}
 			if b.c.RouteMonitoringPolicy == config.BMP_ROUTE_MONITORING_POLICY_TYPE_PRE_POLICY || b.c.RouteMonitoringPolicy == config.BMP_ROUTE_MONITORING_POLICY_TYPE_ALL {
-				ops = append(ops, watchUpdate(true))
+				ops = append(ops, watchUpdate(true, ""))
 			}
 			if b.c.RouteMonitoringPolicy == config.BMP_ROUTE_MONITORING_POLICY_TYPE_POST_POLICY || b.c.RouteMonitoringPolicy == config.BMP_ROUTE_MONITORING_POLICY_TYPE_ALL {
-				ops = append(ops, watchPostUpdate(true))
+				ops = append(ops, watchPostUpdate(true, ""))
 			}
 			if b.c.RouteMonitoringPolicy == config.BMP_ROUTE_MONITORING_POLICY_TYPE_LOCAL_RIB || b.c.RouteMonitoringPolicy == config.BMP_ROUTE_MONITORING_POLICY_TYPE_ALL {
 				ops = append(ops, watchBestPath(true))
@@ -192,10 +192,8 @@ func (b *bmpClient) loop() {
 									}
 								}
 							}
-						} else {
-							if err := write(bmpPeerRoute(bmp.BMP_PEER_TYPE_GLOBAL, msg.PostPolicy, 0, msg.FourBytesAs, info, msg.Timestamp.Unix(), msg.Payload)); err != nil {
-								return false
-							}
+						} else if err := write(bmpPeerRoute(bmp.BMP_PEER_TYPE_GLOBAL, msg.PostPolicy, 0, msg.FourBytesAs, info, msg.Timestamp.Unix(), msg.Payload)); err != nil {
+							return false
 						}
 					case *watchEventBestPath:
 						info := &table.PeerInfo{

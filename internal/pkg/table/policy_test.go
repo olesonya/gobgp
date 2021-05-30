@@ -2771,6 +2771,35 @@ func TestParseCommunityRegexp(t *testing.T) {
 	assert.Equal(t, nil, err)
 	assert.Equal(t, true, exp.MatchString("65000:1"))
 	assert.Equal(t, false, exp.MatchString("65000:100"))
+
+	// test if the parseCommunityRegexp function behaves as expected
+
+	l1 := "6830:24370$"
+	r1, _ := ParseCommunityRegexp("6830:24370$")
+
+	l2 := "^6830:24370$"
+	r2, _ := ParseCommunityRegexp("^6830:24370$")
+
+	l3 := "^65001:100$"
+	r3, _ := ParseCommunityRegexp("65001:100")
+
+	l4 := "^65001:400$"
+	r4, _ := ParseCommunityRegexp("4259905936")
+
+	l5 := "^[0-9]*:300$"
+	r5, _ := ParseCommunityRegexp("^[0-9]*:300$")
+
+	l6 := "^" + strconv.Itoa(int(bgp.COMMUNITY_INTERNET)) + ":" + strconv.Itoa(int(bgp.COMMUNITY_INTERNET)) + "$"
+	r6, _ := ParseCommunityRegexp("INTERNET")
+
+	fmt.Printf("%v %v", l2, r2)
+
+	assert.Equal(t, l1, r1.String())
+	assert.Equal(t, l2, r2.String())
+	assert.Equal(t, l3, r3.String())
+	assert.Equal(t, l4, r4.String())
+	assert.Equal(t, l5, r5.String())
+	assert.Equal(t, l6, r6.String())
 }
 
 func TestLocalPrefAction(t *testing.T) {
@@ -2992,6 +3021,31 @@ func TestPrefixSetMatchV4withV6Prefix(t *testing.T) {
 	}
 
 	path := NewPath(nil, bgp.NewIPAddrPrefix(6, "192.0.0.0"), false, []bgp.PathAttributeInterface{}, time.Now(), false)
+	assert.False(t, m.Evaluate(path, nil))
+}
+
+func TestPrefixSetMatchV6LabeledwithV6Prefix(t *testing.T) {
+	p1 := config.Prefix{
+		IpPrefix:        "2806:106e:19::/48",
+		MasklengthRange: "48..48",
+	}
+	ps, err := NewPrefixSet(config.PrefixSet{
+		PrefixSetName: "ps1",
+		PrefixList:    []config.Prefix{p1},
+	})
+	assert.Nil(t, err)
+	m := &PrefixCondition{
+		set: ps,
+	}
+
+	labels := bgp.NewMPLSLabelStack(100, 200)
+	n1 := bgp.NewLabeledIPv6AddrPrefix(48, "2806:106e:19::", *labels)
+	path := NewPath(nil, n1, false, []bgp.PathAttributeInterface{}, time.Now(), false)
+	assert.True(t, m.Evaluate(path, nil))
+
+	labels = bgp.NewMPLSLabelStack(100, 200)
+	n2 := bgp.NewLabeledIPv6AddrPrefix(48, "1806:106e:19::", *labels)
+	path = NewPath(nil, n2, false, []bgp.PathAttributeInterface{}, time.Now(), false)
 	assert.False(t, m.Evaluate(path, nil))
 }
 

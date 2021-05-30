@@ -194,19 +194,19 @@ func TestListPolicyAssignment(t *testing.T) {
 		Name: table.GLOBAL_RIB_NAME,
 	}, func(p *api.PolicyAssignment) { ps = append(ps, p) })
 	assert.Nil(err)
-	assert.Equal(len(ps), 0)
+	assert.Equal(2, len(ps))
 
 	ps = []*api.PolicyAssignment{}
 	err = s.ListPolicyAssignment(context.Background(), &api.ListPolicyAssignmentRequest{}, func(p *api.PolicyAssignment) { ps = append(ps, p) })
 	assert.Nil(err)
-	assert.Equal(len(ps), 3)
+	assert.Equal(8, len(ps))
 
 	ps = []*api.PolicyAssignment{}
 	err = s.ListPolicyAssignment(context.Background(), &api.ListPolicyAssignmentRequest{
 		Direction: api.PolicyDirection_EXPORT,
 	}, func(p *api.PolicyAssignment) { ps = append(ps, p) })
 	assert.Nil(err)
-	assert.Equal(len(ps), 0)
+	assert.Equal(4, len(ps))
 }
 
 func TestListPathEnableFiltered(test *testing.T) {
@@ -581,7 +581,7 @@ func TestMonitor(test *testing.T) {
 	}
 
 	// Test WatchUpdate with "current" flag.
-	w = s.watch(watchUpdate(true))
+	w = s.watch(watchUpdate(true, ""))
 
 	// Test the initial route.
 	ev = <-w.Event()
@@ -706,10 +706,11 @@ func newPeerandInfo(myAs, as uint32, address string, rib *table.TableManager) (*
 		nConf,
 		rib,
 		policy)
+	p.fsm.peerInfo.ID = net.ParseIP(address)
 	for _, f := range rib.GetRFlist() {
 		p.fsm.rfMap[f] = bgp.BGP_ADD_PATH_NONE
 	}
-	return p, &table.PeerInfo{AS: as, Address: net.ParseIP(address)}
+	return p, &table.PeerInfo{AS: as, Address: net.ParseIP(address), ID: net.ParseIP(address)}
 }
 
 func process(rib *table.TableManager, l []*table.Path) (*table.Path, *table.Path) {
@@ -1287,7 +1288,7 @@ func TestDoNotReactToDuplicateRTCMemberships(t *testing.T) {
 	if err := peerServers(t, ctx, []*BgpServer{s1, s2}, []config.AfiSafiType{config.AFI_SAFI_TYPE_L3VPN_IPV4_UNICAST, config.AFI_SAFI_TYPE_RTC}); err != nil {
 		t.Fatal(err)
 	}
-	watcher := s1.watch(watchUpdate(true))
+	watcher := s1.watch(watchUpdate(true, ""))
 
 	// Add route to vrf1 on s2
 	attrs := []bgp.PathAttributeInterface{
@@ -1557,4 +1558,37 @@ func TestDeleteVrf(t *testing.T) {
 		t.Fatal("Vrf delete failed", err)
 	}
 	s.StopBgp(context.Background(), &api.StopBgpRequest{})
+}
+
+func TestAddBogusPath(t *testing.T) {
+	ctx := context.Background()
+	s := runNewServer(1, "1.1.1.1", 10179)
+
+	nlri, _ := ptypes.MarshalAny(&api.IPAddressPrefix{})
+
+	a, _ := ptypes.MarshalAny(&api.MpReachNLRIAttribute{})
+
+	_, err := s.AddPath(ctx, &api.AddPathRequest{
+		Path: &api.Path{
+			Family: &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST},
+			Nlri:   nlri,
+			Pattrs: []*any.Any{a},
+		},
+	})
+	assert.NotNil(t, err)
+
+	nlri, _ = ptypes.MarshalAny(&api.IPAddressPrefix{})
+
+	a, _ = ptypes.MarshalAny(&api.MpReachNLRIAttribute{
+		Family: &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_FLOW_SPEC_UNICAST},
+	})
+
+	_, err = s.AddPath(ctx, &api.AddPathRequest{
+		Path: &api.Path{
+			Family: &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST},
+			Nlri:   nlri,
+			Pattrs: []*any.Any{a},
+		},
+	})
+	assert.NotNil(t, err)
 }
