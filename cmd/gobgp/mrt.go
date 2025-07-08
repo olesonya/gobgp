@@ -16,29 +16,49 @@
 package main
 
 import (
+	"compress/bzip2"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	api "github.com/osrg/gobgp/api"
-	"github.com/osrg/gobgp/internal/pkg/apiutil"
-	"github.com/osrg/gobgp/pkg/packet/bgp"
-	"github.com/osrg/gobgp/pkg/packet/mrt"
+	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/apiutil"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/mrt"
 )
 
 func injectMrt() error {
-
-	file, err := os.Open(mrtOpts.Filename)
+	var reader io.Reader
+	fileReader, err := os.Open(mrtOpts.Filename)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %s", err)
 	}
 
+	if strings.HasSuffix(mrtOpts.Filename, ".gz") {
+		gzReader, err := gzip.NewReader(fileReader)
+		if err != nil {
+			return fmt.Errorf("failed to open gzip file: %s", err)
+		}
+		reader = gzReader
+	} else if strings.HasSuffix(mrtOpts.Filename, ".bz2") {
+		bz2Reader := bzip2.NewReader(fileReader)
+		reader = bz2Reader
+	} else {
+		reader = fileReader
+	}
+
 	if mrtOpts.NextHop != nil && !mrtOpts.SkipV4 && !mrtOpts.SkipV6 {
 		fmt.Println("You should probably specify either --no-ipv4 or --no-ipv6 when overwriting nexthop, unless your dump contains only one type of routes")
+	}
+
+	if mrtOpts.Best && mrtOpts.PeerASN != 0 {
+		fmt.Println("--only-best has no effect when --peer-asn is specified")
 	}
 
 	var idx int64
@@ -48,11 +68,10 @@ func injectMrt() error {
 
 	ch := make(chan []*api.Path, mrtOpts.QueueSize)
 	go func() {
-
 		var peers []*mrt.Peer
 		for {
 			buf := make([]byte, mrt.MRT_COMMON_HEADER_LEN)
-			_, err := file.Read(buf)
+			_, err := io.ReadFull(reader, buf)
 			if err == io.EOF {
 				break
 			} else if err != nil {
@@ -66,7 +85,7 @@ func injectMrt() error {
 			}
 
 			buf = make([]byte, h.Len)
-			_, err = file.Read(buf)
+			_, err = io.ReadFull(reader, buf)
 			if err != nil {
 				exitWithError(fmt.Errorf("failed to read"))
 			}
@@ -111,10 +130,14 @@ func injectMrt() error {
 				paths := make([]*api.Path, 0, len(rib.Entries))
 
 				for _, e := range rib.Entries {
-					if len(peers) < int(e.PeerIndex) {
+					if len(peers) <= int(e.PeerIndex) {
 						exitWithError(fmt.Errorf("invalid peer index: %d (PEER_INDEX_TABLE has only %d peers)", e.PeerIndex, len(peers)))
 					}
-					//t := time.Unix(int64(e.OriginatedTime), 0)
+					// t := time.Unix(int64(e.OriginatedTime), 0)
+
+					if mrtOpts.PeerASN != 0 && peers[e.PeerIndex].AS != mrtOpts.PeerASN {
+						continue
+					}
 
 					var attrs []bgp.PathAttributeInterface
 					switch subType {
@@ -144,7 +167,7 @@ func injectMrt() error {
 						}
 					}
 
-					path := apiutil.NewPath(nlri, false, attrs, time.Unix(int64(e.OriginatedTime), 0))
+					path, _ := apiutil.NewPath(nlri, false, attrs, time.Unix(int64(e.OriginatedTime), 0))
 					path.SourceAsn = peers[e.PeerIndex].AS
 					path.SourceId = peers[e.PeerIndex].BgpId.String()
 
@@ -153,7 +176,7 @@ func injectMrt() error {
 				}
 
 				// TODO: calculate properly if necessary.
-				if mrtOpts.Best {
+				if mrtOpts.Best && len(paths) > 0 {
 					paths = []*api.Path{paths[0]}
 				}
 
@@ -178,7 +201,7 @@ func injectMrt() error {
 
 	for paths := range ch {
 		err = stream.Send(&api.AddPathStreamRequest{
-			TableType: api.TableType_GLOBAL,
+			TableType: api.TableType_TABLE_TYPE_GLOBAL,
 			Paths:     paths,
 		})
 		if err != nil {
@@ -234,5 +257,6 @@ func newMrtCmd() *cobra.Command {
 	mrtCmd.PersistentFlags().BoolVarP(&mrtOpts.SkipV6, "no-ipv6", "", false, "Do not import IPv6 routes")
 	mrtCmd.PersistentFlags().IntVarP(&mrtOpts.QueueSize, "queue-size", "", 1<<10, "Maximum number of updates to keep queued")
 	mrtCmd.PersistentFlags().IPVarP(&mrtOpts.NextHop, "nexthop", "", nil, "Overwrite nexthop")
+	mrtCmd.PersistentFlags().Uint32VarP(&mrtOpts.PeerASN, "peer-asn", "", 0, "Inject prefixes only from specified AS number")
 	return mrtCmd
 }

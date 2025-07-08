@@ -18,22 +18,25 @@ package table
 import (
 	"fmt"
 
-	"github.com/osrg/gobgp/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/log"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
 
 type AdjRib struct {
-	accepted map[bgp.RouteFamily]int
-	table    map[bgp.RouteFamily]*Table
+	accepted map[bgp.Family]int
+	table    map[bgp.Family]*Table
+	logger   log.Logger
 }
 
-func NewAdjRib(rfList []bgp.RouteFamily) *AdjRib {
-	m := make(map[bgp.RouteFamily]*Table)
+func NewAdjRib(logger log.Logger, rfList []bgp.Family) *AdjRib {
+	m := make(map[bgp.Family]*Table)
 	for _, f := range rfList {
-		m[f] = NewTable(f)
+		m[f] = NewTable(logger, f)
 	}
 	return &AdjRib{
 		table:    m,
-		accepted: make(map[bgp.RouteFamily]int),
+		accepted: make(map[bgp.Family]int),
+		logger:   logger,
 	}
 }
 
@@ -42,8 +45,8 @@ func (adj *AdjRib) Update(pathList []*Path) {
 		if path == nil || path.IsEOR() {
 			continue
 		}
-		rf := path.GetRouteFamily()
-		t := adj.table[path.GetRouteFamily()]
+		rf := path.GetFamily()
+		t := adj.table[path.GetFamily()]
 		d := t.getOrCreateDest(path.GetNlri(), 0)
 		var old *Path
 		idx := -1
@@ -89,26 +92,28 @@ func (adj *AdjRib) Update(pathList []*Path) {
 	}
 }
 
-/* The provided pathList is expected to be the real candidate routes after policy evaluation.
-   For routes that are filtered by policy, there could be a mismatch between display
-   and actual rib sent to the peer (if softreset out was not run).
-   Only used to display adj-out because we do not maintain a separate adj-out table
+/*
+The provided pathList is expected to be the real candidate routes after policy evaluation.
+
+	For routes that are filtered by policy, there could be a mismatch between display
+	and actual rib sent to the peer (if softreset out was not run).
+	Only used to display adj-out because we do not maintain a separate adj-out table
 */
 func (adj *AdjRib) UpdateAdjRibOut(pathList []*Path) {
 	for _, path := range pathList {
 		if path == nil || path.IsEOR() {
 			continue
 		}
-		t := adj.table[path.GetRouteFamily()]
+		t := adj.table[path.GetFamily()]
 		d := t.getOrCreateDest(path.GetNlri(), 0)
 		d.knownPathList = append(d.knownPathList, path)
 	}
 }
 
-func (adj *AdjRib) walk(families []bgp.RouteFamily, fn func(*Destination) bool) {
+func (adj *AdjRib) walk(families []bgp.Family, fn func(*Destination) bool) {
 	for _, f := range families {
 		if t, ok := adj.table[f]; ok {
-			for _, d := range t.destinations {
+			for _, d := range t.GetDestinations() {
 				if fn(d) {
 					return
 				}
@@ -117,7 +122,7 @@ func (adj *AdjRib) walk(families []bgp.RouteFamily, fn func(*Destination) bool) 
 	}
 }
 
-func (adj *AdjRib) PathList(rfList []bgp.RouteFamily, accepted bool) []*Path {
+func (adj *AdjRib) PathList(rfList []bgp.Family, accepted bool) []*Path {
 	pathList := make([]*Path, 0, adj.Count(rfList))
 	adj.walk(rfList, func(d *Destination) bool {
 		for _, p := range d.knownPathList {
@@ -131,7 +136,7 @@ func (adj *AdjRib) PathList(rfList []bgp.RouteFamily, accepted bool) []*Path {
 	return pathList
 }
 
-func (adj *AdjRib) Count(rfList []bgp.RouteFamily) int {
+func (adj *AdjRib) Count(rfList []bgp.Family) int {
 	count := 0
 	adj.walk(rfList, func(d *Destination) bool {
 		count += len(d.knownPathList)
@@ -140,7 +145,7 @@ func (adj *AdjRib) Count(rfList []bgp.RouteFamily) int {
 	return count
 }
 
-func (adj *AdjRib) Accepted(rfList []bgp.RouteFamily) int {
+func (adj *AdjRib) Accepted(rfList []bgp.Family) int {
 	count := 0
 	for _, rf := range rfList {
 		if n, ok := adj.accepted[rf]; ok {
@@ -150,7 +155,7 @@ func (adj *AdjRib) Accepted(rfList []bgp.RouteFamily) int {
 	return count
 }
 
-func (adj *AdjRib) Drop(rfList []bgp.RouteFamily) []*Path {
+func (adj *AdjRib) Drop(rfList []bgp.Family) []*Path {
 	l := make([]*Path, 0, adj.Count(rfList))
 	adj.walk(rfList, func(d *Destination) bool {
 		for _, p := range d.knownPathList {
@@ -161,13 +166,13 @@ func (adj *AdjRib) Drop(rfList []bgp.RouteFamily) []*Path {
 		return false
 	})
 	for _, rf := range rfList {
-		adj.table[rf] = NewTable(rf)
+		adj.table[rf] = NewTable(adj.logger, rf)
 		adj.accepted[rf] = 0
 	}
 	return l
 }
 
-func (adj *AdjRib) DropStale(rfList []bgp.RouteFamily) []*Path {
+func (adj *AdjRib) DropStale(rfList []bgp.Family) []*Path {
 	pathList := make([]*Path, 0, adj.Count(rfList))
 	adj.walk(rfList, func(d *Destination) bool {
 		for _, p := range d.knownPathList {
@@ -183,7 +188,7 @@ func (adj *AdjRib) DropStale(rfList []bgp.RouteFamily) []*Path {
 	return pathList
 }
 
-func (adj *AdjRib) StaleAll(rfList []bgp.RouteFamily) []*Path {
+func (adj *AdjRib) StaleAll(rfList []bgp.Family) []*Path {
 	pathList := make([]*Path, 0, adj.Count(rfList))
 	adj.walk(rfList, func(d *Destination) bool {
 		for i, p := range d.knownPathList {
@@ -200,7 +205,7 @@ func (adj *AdjRib) StaleAll(rfList []bgp.RouteFamily) []*Path {
 	return pathList
 }
 
-func (adj *AdjRib) MarkLLGRStaleOrDrop(rfList []bgp.RouteFamily) []*Path {
+func (adj *AdjRib) MarkLLGRStaleOrDrop(rfList []bgp.Family) []*Path {
 	pathList := make([]*Path, 0, adj.Count(rfList))
 	adj.walk(rfList, func(d *Destination) bool {
 		for i, p := range d.knownPathList {
@@ -225,21 +230,21 @@ func (adj *AdjRib) MarkLLGRStaleOrDrop(rfList []bgp.RouteFamily) []*Path {
 	return pathList
 }
 
-func (adj *AdjRib) Select(family bgp.RouteFamily, accepted bool, option ...TableSelectOption) (*Table, error) {
+func (adj *AdjRib) Select(family bgp.Family, accepted bool, option ...TableSelectOption) (*Table, error) {
 	t, ok := adj.table[family]
 	if !ok {
-		t = NewTable(family)
+		t = NewTable(adj.logger, family)
 	}
 	option = append(option, TableSelectOption{adj: true})
 	return t.Select(option...)
 }
 
-func (adj *AdjRib) TableInfo(family bgp.RouteFamily) (*TableInfo, error) {
+func (adj *AdjRib) TableInfo(family bgp.Family) (*TableInfo, error) {
 	if _, ok := adj.table[family]; !ok {
 		return nil, fmt.Errorf("%s unsupported", family)
 	}
-	c := adj.Count([]bgp.RouteFamily{family})
-	a := adj.Accepted([]bgp.RouteFamily{family})
+	c := adj.Count([]bgp.Family{family})
+	a := adj.Accepted([]bgp.Family{family})
 	return &TableInfo{
 		NumDestination: c,
 		NumPath:        c,

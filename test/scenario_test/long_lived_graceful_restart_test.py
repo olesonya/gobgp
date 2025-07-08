@@ -19,6 +19,9 @@ import sys
 import time
 import unittest
 
+import collections
+collections.Callable = collections.abc.Callable
+
 import nose
 
 from lib.noseplugin import OptionParser, parser_option
@@ -26,6 +29,7 @@ from lib.noseplugin import OptionParser, parser_option
 from lib import base
 from lib.base import (
     BGP_FSM_ACTIVE,
+    BGP_FSM_IDLE,
     BGP_FSM_ESTABLISHED,
     LONG_LIVED_GRACEFUL_RESTART_TIME,
     local,
@@ -230,7 +234,7 @@ class GoBGPTestBase(unittest.TestCase):
 
         time.sleep(1)
 
-        # llgr_stale route depreference must happend
+        # llgr_stale route depreference must happen
         # check g4's path is chosen as best and advertised
         rib = g3.get_global_rib('10.0.0.0/24')
         self.assertEqual(len(rib), 1)
@@ -246,6 +250,32 @@ class GoBGPTestBase(unittest.TestCase):
         g3 = self.bgpds['g3']
         rib = g3.get_global_rib('10.10.0.0/24')
         self.assertEqual(len(rib), 0)
+
+    def test_09_peer_disabled_during_graceful_restart(self):
+        g1 = self.bgpds['g1']
+        g3 = self.bgpds['g3']
+
+        g3.local('gobgp global rib add 10.20.0.0/24')
+
+        time.sleep(1)
+
+        g3.local("ip route add blackhole {}/32".format(g1.ip_addrs[0][1].split("/")[0]))
+        time.sleep(1)
+        # disable peering after traffic is blocked
+        g3.local("gobgp nei {} disable".format(g1.ip_addrs[0][1].split("/")[0]))
+
+        # wait for hold timer and unblock traffic
+        g1.wait_for(expected_state=BGP_FSM_ACTIVE, peer=g3)
+        g3.local("ip route del blackhole {}/32".format(g1.ip_addrs[0][1].split("/")[0]))
+
+        # wait for a reconnect attempt of g1 to g3
+        g1.wait_for(expected_state=BGP_FSM_IDLE, peer=g3)
+        g1.wait_for(expected_state=BGP_FSM_ACTIVE, peer=g3)
+
+        self.assertEqual(len(g1.get_global_rib('10.20.0.0/24')), 1)
+        r = g1.get_global_rib('10.20.0.0/24')[0]['paths'][0]
+        comms = list(chain.from_iterable([attr['communities'] for attr in r['attrs'] if attr['type'] == 8]))
+        self.assertEqual(comms.count(0xffff0006), 1)
 
 
 if __name__ == '__main__':

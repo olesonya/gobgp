@@ -46,7 +46,7 @@ gobgp has the following subcommands.
 # show all Route information
 % gobgp global rib [-a <address family>]
 # show a specific route information
-% gobgp global rib [<prefix>|<host>] [longer-prefixes|shorter-prefixes] [-a <address family>]
+% gobgp global rib [<prefix>|<host>] [rd <rd>] [longer-prefixes|shorter-prefixes] [-a <address family>]
 # show table summary
 % gobgp global rib summary [-a <address family>]
 ```
@@ -100,12 +100,13 @@ The following options can be specified in the global subcommand:
 
 | short  |long           | description                                | default |
 |--------|---------------|--------------------------------------------|---------|
-|a       |address-family |specify any one from among `ipv4`, `ipv6`, `vpnv4`, `vpnv6`, `ipv4-labeled`, `ipv6-labeled`, `evpn`, `encap`, `rtc`, `ipv4-flowspec`, `ipv6-flowspec`, `l2vpn-flowspec`, `opaque` | `ipv4` |
+|a       |address-family |specify any one from among `ipv4`, `ipv6`, `vpnv4`, `vpnv6`, `ipv4-labeled`, `ipv6-labeled`, `evpn`, `encap`, `rtc`, `ipv4-flowspec`, `ipv6-flowspec`, `l2vpn-flowspec`, `ipv4-mup`, `ipv6-mup`,  `opaque` | `ipv4` |
 
 Also, refer to the following for the detail syntax of each address family.
 
 - `evpn` address family: [CLI Syntax for EVPN](evpn.md#cli-syntax)
 - `*-flowspec` address family: [CLI Syntax for Flow Specification](flowspec.md#cli-syntax)
+- `*-mup` address family: [CLI Syntax for SRv6 MUP](srv6_mup.md#cli-syntax)
 
 ## 2. neighbor subcommand
 
@@ -126,7 +127,7 @@ Also, refer to the following for the detail syntax of each address family.
 
 ```shell
 # add neighbor
-% gobgp neighbor add { <neighbor address> | interface <ifname> } as <as number> [ vrf <vrf-name> | route-reflector-client [<cluster-id>] | route-server-client | allow-own-as <num> | remove-private-as (all|replace) | replace-peer-as | ebgp-multihop-ttl <ttl>]
+% gobgp neighbor add { <neighbor address> | interface <ifname> } as <as number> [ local-as <as number> | vrf <vrf-name> | route-reflector-client [<cluster-id>] | route-server-client | allow-own-as <num> | remove-private-as (all|replace) | replace-peer-as | ebgp-multihop-ttl <ttl>]
 # delete neighbor
 % gobgp neighbor del { <neighbor address> | interface <ifname> }
 % gobgp neighbor <neighbor address> softreset [-a <address family>]
@@ -143,7 +144,7 @@ The following options can be specified in the neighbor subcommand:
 
 | short  |long           | description                                | default |
 |--------|---------------|--------------------------------------------|---------|
-|a       |address-family |specify any one from among `ipv4`, `ipv6`, `vpnv4`, `vpnv6`, `ipv4-labeled`, `ipv6-labeld`, `evpn`, `encap`, `rtc`, `ipv4-flowspec`, `ipv6-flowspec`, `l2vpn-flowspec`, `opaque` | `ipv4` |
+|a       |address-family |specify any one from among `ipv4`, `ipv6`, `vpnv4`, `vpnv6`, `ipv4-labeled`, `ipv6-labeld`, `evpn`, `encap`, `rtc`, `ipv4-flowspec`, `ipv6-flowspec`, `l2vpn-flowspec`, `ipv4-mup`, `ipv6-mup`, `opaque` | `ipv4` |
 
 ### 2.3. Show Rib - local-rib/adj-rib-in/adj-rib-out -
 
@@ -153,7 +154,7 @@ The following options can be specified in the neighbor subcommand:
 # show all routes in [local|adj-in|adj-out] table
 % gobgp neighbor <neighbor address> [local|adj-in|adj-out] [-a <address family>]
 # show a specific route in [local|adj-in|adj-out] table
-% gobgp neighbor <neighbor address> [local|adj-in|adj-out] [<prefix>|<host>] [longer-prefixes|shorter-prefixes] [-a <address family>]
+% gobgp neighbor <neighbor address> [local|adj-in|adj-out] [<prefix>|<host>] [rd <rd>] [longer-prefixes|shorter-prefixes] [-a <address family>]
 # show table summary
 % gobgp neighbor <neighbor address> [local|adj-in|adj-out] summary [-a <address family>]
 # show RPKI detailed information in adj-in table
@@ -174,7 +175,7 @@ The following options can be specified in the neighbor subcommand:
 
 | short  |long           | description                                | default |
 |--------|---------------|--------------------------------------------|---------|
-|a       |address-family |specify any one from among `ipv4`, `ipv6`, `vpnv4`, `vpnv6`, `ipv4-labeled`, `ipv6-labeld`, `evpn`, `encap`, `rtc`, `ipv4-flowspec`, `ipv6-flowspec`, `l2vpn-flowspec`, `opaque` | `ipv4` |
+|a       |address-family |specify any one from among `ipv4`, `ipv6`, `vpnv4`, `vpnv6`, `ipv4-labeled`, `ipv6-labeld`, `evpn`, `encap`, `rtc`, `ipv4-flowspec`, `ipv6-flowspec`, `l2vpn-flowspec`, `ipv4-mup`, `ipv6-mup`,, `opaque` | `ipv4` |
 
 ### 2.4. Operations for Policy  - add/del/show -
 

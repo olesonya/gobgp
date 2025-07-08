@@ -1,4 +1,4 @@
-// Copyright (C) 2015,2016 Nippon Telegraph and Telephone Corporation.
+// Copyright (C) 2015-2021 Nippon Telegraph and Telephone Corporation.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package server
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -23,13 +24,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/osrg/gobgp/internal/pkg/config"
-	"github.com/osrg/gobgp/internal/pkg/table"
-	"github.com/osrg/gobgp/pkg/packet/bgp"
-	"github.com/osrg/gobgp/pkg/packet/rtr"
-
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
+	"github.com/osrg/gobgp/v4/internal/pkg/table"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
+	"github.com/osrg/gobgp/v4/pkg/log"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/rtr"
 )
 
 const (
@@ -54,19 +53,22 @@ type roaEvent struct {
 	Src       string
 	Data      []byte
 	conn      *net.TCPConn
+	timestamp time.Time
 }
 
 type roaManager struct {
 	eventCh   chan *roaEvent
 	clientMap map[string]*roaClient
 	table     *table.ROATable
+	logger    log.Logger
 }
 
-func newROAManager(table *table.ROATable) *roaManager {
+func newROAManager(table *table.ROATable, logger log.Logger) *roaManager {
 	m := &roaManager{
 		eventCh:   make(chan *roaEvent),
 		clientMap: make(map[string]*roaClient),
 		table:     table,
+		logger:    logger,
 	}
 	return m
 }
@@ -105,8 +107,7 @@ func (m *roaManager) Enable(address string) error {
 	for network, client := range m.clientMap {
 		add, _, _ := net.SplitHostPort(network)
 		if add == address {
-			client.enable(client.serialNumber)
-			return nil
+			return client.enable(client.serialNumber)
 		}
 	}
 	return fmt.Errorf("ROA server not found %s", address)
@@ -132,9 +133,8 @@ func (m *roaManager) SoftReset(address string) error {
 	for network, client := range m.clientMap {
 		add, _, _ := net.SplitHostPort(network)
 		if add == address {
-			client.softReset()
 			m.table.DeleteAll(network)
-			return nil
+			return client.softReset()
 		}
 	}
 	return fmt.Errorf("ROA server not found %s", address)
@@ -148,6 +148,7 @@ func (c *roaClient) lifetimeout() {
 	c.eventCh <- &roaEvent{
 		EventType: roaLifetimeout,
 		Src:       c.host,
+		timestamp: time.Now(),
 	}
 }
 
@@ -157,23 +158,35 @@ func (m *roaManager) HandleROAEvent(ev *roaEvent) {
 		if ev.EventType == roaConnected {
 			ev.conn.Close()
 		}
-		log.WithFields(log.Fields{"Topic": "rpki"}).Errorf("Can't find %s ROA server configuration", ev.Src)
+		m.logger.Error("Can't find ROA server configuration",
+			log.Fields{
+				"Topic": "rpki",
+				"Key":   ev.Src,
+			})
 		return
 	}
 	switch ev.EventType {
 	case roaDisconnected:
-		log.WithFields(log.Fields{"Topic": "rpki"}).Infof("ROA server %s is disconnected", ev.Src)
+		m.logger.Info("ROA server is disconnected",
+			log.Fields{
+				"Topic": "rpki",
+				"Key":   ev.Src,
+			})
 		client.state.Downtime = time.Now().Unix()
 		// clear state
 		client.endOfData = false
 		client.pendingROAs = make([]*table.ROA, 0)
-		client.state.RpkiMessages = config.RpkiMessages{}
+		client.state.RpkiMessages = oc.RpkiMessages{}
 		client.conn = nil
 		go client.tryConnect()
 		client.timer = time.AfterFunc(time.Duration(client.lifetime)*time.Second, client.lifetimeout)
 		client.oldSessionID = client.sessionID
 	case roaConnected:
-		log.WithFields(log.Fields{"Topic": "rpki"}).Infof("ROA server %s is connected", ev.Src)
+		m.logger.Info("ROA server is connected",
+			log.Fields{
+				"Topic": "rpki",
+				"Key":   ev.Src,
+			})
 		client.conn = ev.conn
 		client.state.Uptime = time.Now().Unix()
 		go client.established()
@@ -188,28 +201,50 @@ func (m *roaManager) HandleROAEvent(ev *roaEvent) {
 		// all stale ROAs were deleted -> timer was cancelled
 		// so should not be here.
 		if client.oldSessionID != client.sessionID {
-			log.WithFields(log.Fields{"Topic": "rpki"}).Infof("Reconnected to %s. Ignore timeout", client.host)
+			m.logger.Info("Reconnected, ignore timeout",
+				log.Fields{
+					"Topic": "rpki",
+					"Key":   client.host,
+				})
 		} else {
-			log.WithFields(log.Fields{"Topic": "rpki"}).Infof("Deleting all ROAs due to timeout with:%s", client.host)
+			m.logger.Info("Deleting all ROAs due to timeout",
+				log.Fields{
+					"Topic": "rpki",
+					"Key":   client.host,
+				})
 			m.table.DeleteAll(client.host)
 		}
 	}
 }
 
-func (m *roaManager) handleRTRMsg(client *roaClient, state *config.RpkiServerState, buf []byte) {
+func (m *roaManager) handleRTRMsg(client *roaClient, state *oc.RpkiServerState, buf []byte) {
 	received := &state.RpkiMessages.RpkiReceived
 
 	m1, err := rtr.ParseRTR(buf)
 	if err == nil {
 		switch msg := m1.(type) {
 		case *rtr.RTRSerialNotify:
-			if before(client.serialNumber, msg.RTRCommon.SerialNumber) {
-				client.enable(client.serialNumber)
-			} else if client.serialNumber == msg.RTRCommon.SerialNumber {
+			if before(client.serialNumber, msg.SerialNumber) {
+				if err := client.enable(client.serialNumber); err != nil {
+					m.logger.Error("Failed to send serial query",
+						log.Fields{
+							"Topic": "rpki",
+							"Host":  client.host,
+							"Error": err,
+						})
+				}
+			} else if client.serialNumber == msg.SerialNumber {
 				// nothing
 			} else {
 				// should not happen. try to get the whole ROAs.
-				client.softReset()
+				if err := client.softReset(); err != nil {
+					m.logger.Error("Failed to send soft reset",
+						log.Fields{
+							"Topic": "rpki",
+							"Host":  client.host,
+							"Error": err,
+						})
+				}
 			}
 			received.SerialNotify++
 		case *rtr.RTRSerialQuery:
@@ -226,7 +261,7 @@ func (m *roaManager) handleRTRMsg(client *roaClient, state *config.RpkiServerSta
 				received.Ipv6Prefix++
 			}
 			roa := table.NewROA(family, msg.Prefix, msg.PrefixLen, msg.MaxLen, msg.AS, client.host)
-			if (msg.Flags & 1) == 1 {
+			if msg.Flags&1 == 1 {
 				if client.endOfData {
 					m.table.Add(roa)
 				} else {
@@ -237,13 +272,13 @@ func (m *roaManager) handleRTRMsg(client *roaClient, state *config.RpkiServerSta
 			}
 		case *rtr.RTREndOfData:
 			received.EndOfData++
-			if client.sessionID != msg.RTRCommon.SessionID {
+			if client.sessionID != msg.SessionID {
 				// remove all ROAs related with the
 				// previous session
 				m.table.DeleteAll(client.host)
 			}
-			client.sessionID = msg.RTRCommon.SessionID
-			client.serialNumber = msg.RTRCommon.SerialNumber
+			client.sessionID = msg.SessionID
+			client.serialNumber = msg.SerialNumber
 			client.endOfData = true
 			if client.timer != nil {
 				client.timer.Stop()
@@ -254,25 +289,33 @@ func (m *roaManager) handleRTRMsg(client *roaClient, state *config.RpkiServerSta
 			}
 			client.pendingROAs = make([]*table.ROA, 0)
 		case *rtr.RTRCacheReset:
-			client.softReset()
+			if err := client.softReset(); err != nil {
+				m.logger.Error("Failed to send soft reset",
+					log.Fields{
+						"Topic": "rpki",
+						"Host":  client.host,
+						"Error": err,
+					})
+			}
 			received.CacheReset++
 		case *rtr.RTRErrorReport:
 			received.Error++
 		}
 	} else {
-		log.WithFields(log.Fields{
-			"Topic": "rpki",
-			"Host":  client.host,
-			"Error": err,
-		}).Info("Failed to parse an RTR message")
+		m.logger.Info("Failed to parse an RTR message",
+			log.Fields{
+				"Topic": "rpki",
+				"Host":  client.host,
+				"Error": err,
+			})
 	}
 }
 
-func (m *roaManager) GetServers() []*config.RpkiServer {
+func (m *roaManager) GetServers() []*oc.RpkiServer {
 	recordsV4, prefixesV4 := m.table.Info(bgp.RF_IPv4_UC)
 	recordsV6, prefixesV6 := m.table.Info(bgp.RF_IPv6_UC)
 
-	l := make([]*config.RpkiServer, 0, len(m.clientMap))
+	l := make([]*oc.RpkiServer, 0, len(m.clientMap))
 	for _, client := range m.clientMap {
 		state := &client.state
 
@@ -294,8 +337,8 @@ func (m *roaManager) GetServers() []*config.RpkiServer {
 		state.SerialNumber = client.serialNumber
 
 		addr, port, _ := net.SplitHostPort(client.host)
-		l = append(l, &config.RpkiServer{
-			Config: config.RpkiServerConfig{
+		l = append(l, &oc.RpkiServer{
+			Config: oc.RpkiServerConfig{
 				Address: addr,
 				// Note: RpkiServerConfig.Port is uint32 type, but the TCP/UDP
 				// port is 16-bit length.
@@ -310,7 +353,7 @@ func (m *roaManager) GetServers() []*config.RpkiServer {
 type roaClient struct {
 	host         string
 	conn         *net.TCPConn
-	state        config.RpkiServerState
+	state        oc.RpkiServerState
 	eventCh      chan *roaEvent
 	sessionID    uint16
 	oldSessionID uint16
@@ -391,6 +434,7 @@ func (c *roaClient) tryConnect() {
 				EventType: roaConnected,
 				Src:       c.host,
 				conn:      conn.(*net.TCPConn),
+				timestamp: time.Now(),
 			}
 			return
 		}
@@ -403,6 +447,7 @@ func (c *roaClient) established() (err error) {
 		c.eventCh <- &roaEvent{
 			EventType: roaDisconnected,
 			Src:       c.host,
+			timestamp: time.Now(),
 		}
 	}()
 
@@ -429,6 +474,7 @@ func (c *roaClient) established() (err error) {
 			EventType: roaRTR,
 			Src:       c.host,
 			Data:      append(header, body...),
+			timestamp: time.Now(),
 		}
 	}
 }

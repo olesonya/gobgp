@@ -169,6 +169,20 @@ module gobgp {
     reference "RFC7752";
   }
 
+  identity IPV4-MUP {
+    base bgp-types:afi-safi-type;
+    description
+      "MUP IPv4 (AFI,SAFI = 1,85)";
+    reference "https://www.ietf.org/archive/id/draft-mpmz-bess-mup-safi-01.html";
+  }
+
+  identity IPV6-MUP {
+    base bgp-types:afi-safi-type;
+    description
+      "MUP IPv6 (AFI,SAFI = 2,85)";
+    reference "https://www.ietf.org/archive/id/draft-mpmz-bess-mup-safi-01.html";
+  }
+
   grouping gobgp-message-counter {
     description
       "Counters for all BGPMessage types";
@@ -926,6 +940,11 @@ module gobgp {
   }
 
   augment "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:transport/bgp:config" {
+    leaf local-port {
+      description "Set the local port (if available) to use for the session.";
+      type inet:port-number;
+    }
+
     leaf remote-port {
       type inet:port-number;
     }
@@ -984,6 +1003,18 @@ module gobgp {
       type boolean;
     }
     leaf long-lived-enabled {
+      type boolean;
+    }
+  }
+
+  augment "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:config" {
+    leaf send-software-version {
+      type boolean;
+    }
+  }
+
+  augment "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:config" {
+    leaf send-software-version {
       type boolean;
     }
   }
@@ -1262,7 +1293,7 @@ module gobgp {
       type string;
       description
         "Configure zebra software name.
-        frr4, cumulus, frr6, frr7, frr7.2 and frr7.3 can be used.";
+        frr4, cumulus, frr6, frr7, frr7.2, frr7.3, frr7.4, frr7.5, frr8, frr8.1 can be used.";
     }
   }
 
@@ -1425,6 +1456,28 @@ module gobgp {
       container state {
           uses bgp:bgp-neighbor-add-paths_config;
       }
+    }
+  }
+
+  augment "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:as-path-options/bgp:config" {
+    leaf allow-as-path-loop-local {
+      type boolean;
+      description
+        "Bypasses as-path loop detection on locally sourced (static) routes
+        when exporting towards iBGP neighbors. This is needed in some environments
+        where gobgp is functioning as a route injector. Non-local routes
+        are still checked for as-path loops.";
+    }
+  }
+
+  augment "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:as-path-options/bgp:state" {
+    leaf allow-as-path-loop-local {
+      type boolean;
+      description
+        "Bypasses as-path loop detection on locally sourced (static) routes
+        when exporting towards iBGP neighbors. This is needed in some environments
+        where gobgp is functioning as a route injector. Non-local routes
+        are still checked for as-path loops.";
     }
   }
 }

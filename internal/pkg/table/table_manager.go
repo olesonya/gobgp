@@ -22,9 +22,9 @@ import (
 	"time"
 
 	farm "github.com/dgryski/go-farm"
-	log "github.com/sirupsen/logrus"
 
-	"github.com/osrg/gobgp/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/log"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
 
 const (
@@ -88,10 +88,7 @@ func ProcessMessage(m *bgp.BGPMessage, peerInfo *PeerInfo, timestamp time.Time) 
 		pathList = append(pathList, p)
 	}
 	if reach != nil {
-		reachAttrs := make([]bgp.PathAttributeInterface, len(attrs)+1)
-		copy(reachAttrs, attrs)
-		// we sort attributes when creating a bgp message from paths
-		reachAttrs[len(reachAttrs)-1] = reach
+		nexthop := reach.Nexthop.String()
 
 		for _, nlri := range reach.Value {
 			// when build path from reach
@@ -99,6 +96,11 @@ func ProcessMessage(m *bgp.BGPMessage, peerInfo *PeerInfo, timestamp time.Time) 
 			// this happens when a MP peer send update to gobgp
 			// However nlri is always populated because how we build the path
 			// path.info{nlri: nlri}
+			// Compute a new attribute array for each path with one NLRI to make serialization
+			// of path attrs faster
+			nlriAttr := bgp.NewPathAttributeMpReachNLRI(nexthop, []bgp.AddrPrefixInterface{nlri})
+			reachAttrs := makeAttributeList(attrs, nlriAttr)
+
 			p := NewPath(peerInfo, nlri, false, reachAttrs, timestamp, false)
 			p.SetHash(hash)
 			pathList = append(pathList, p)
@@ -111,25 +113,38 @@ func ProcessMessage(m *bgp.BGPMessage, peerInfo *PeerInfo, timestamp time.Time) 
 	return pathList
 }
 
-type TableManager struct {
-	Tables map[bgp.RouteFamily]*Table
-	Vrfs   map[string]*Vrf
-	rfList []bgp.RouteFamily
+func makeAttributeList(
+	attrs []bgp.PathAttributeInterface, reach *bgp.PathAttributeMpReachNLRI,
+) []bgp.PathAttributeInterface {
+	reachAttrs := make([]bgp.PathAttributeInterface, len(attrs)+1)
+	copy(reachAttrs, attrs)
+	// we sort attributes when creating a bgp message from paths
+	reachAttrs[len(reachAttrs)-1] = reach
+
+	return reachAttrs
 }
 
-func NewTableManager(rfList []bgp.RouteFamily) *TableManager {
+type TableManager struct {
+	Tables map[bgp.Family]*Table
+	Vrfs   map[string]*Vrf
+	rfList []bgp.Family
+	logger log.Logger
+}
+
+func NewTableManager(logger log.Logger, rfList []bgp.Family) *TableManager {
 	t := &TableManager{
-		Tables: make(map[bgp.RouteFamily]*Table),
+		Tables: make(map[bgp.Family]*Table),
 		Vrfs:   make(map[string]*Vrf),
 		rfList: rfList,
+		logger: logger,
 	}
 	for _, rf := range rfList {
-		t.Tables[rf] = NewTable(rf)
+		t.Tables[rf] = NewTable(logger, rf)
 	}
 	return t
 }
 
-func (manager *TableManager) GetRFlist() []bgp.RouteFamily {
+func (manager *TableManager) GetRFlist() []bgp.Family {
 	return manager.rfList
 }
 
@@ -137,13 +152,14 @@ func (manager *TableManager) AddVrf(name string, id uint32, rd bgp.RouteDistingu
 	if _, ok := manager.Vrfs[name]; ok {
 		return nil, fmt.Errorf("vrf %s already exists", name)
 	}
-	log.WithFields(log.Fields{
-		"Topic":    "Vrf",
-		"Key":      name,
-		"Rd":       rd,
-		"ImportRt": importRt,
-		"ExportRt": exportRt,
-	}).Debugf("add vrf")
+	manager.logger.Debug("add vrf",
+		log.Fields{
+			"Topic":    "Vrf",
+			"Key":      name,
+			"Rd":       rd,
+			"ImportRt": importRt,
+			"ExportRt": exportRt,
+		})
 	manager.Vrfs[name] = &Vrf{
 		Name:     name,
 		Id:       id,
@@ -172,29 +188,19 @@ func (manager *TableManager) DeleteVrf(name string) ([]*Path, error) {
 	for _, t := range manager.Tables {
 		msgs = append(msgs, t.deletePathsByVrf(vrf)...)
 	}
-	log.WithFields(log.Fields{
-		"Topic":     "Vrf",
-		"Key":       vrf.Name,
-		"Rd":        vrf.Rd,
-		"ImportRt":  vrf.ImportRt,
-		"ExportRt":  vrf.ExportRt,
-		"MplsLabel": vrf.MplsLabel,
-	}).Debugf("delete vrf")
+	manager.logger.Debug("delete vrf",
+		log.Fields{
+			"Topic":     "Vrf",
+			"Key":       vrf.Name,
+			"Rd":        vrf.Rd,
+			"ImportRt":  vrf.ImportRt,
+			"ExportRt":  vrf.ExportRt,
+			"MplsLabel": vrf.MplsLabel,
+		})
 	delete(manager.Vrfs, name)
 	rtcTable := manager.Tables[bgp.RF_RTC_UC]
 	msgs = append(msgs, rtcTable.deleteRTCPathsByVrf(vrf, manager.Vrfs)...)
 	return msgs, nil
-}
-
-func (tm *TableManager) update(newPath *Path) *Update {
-	t := tm.Tables[newPath.GetRouteFamily()]
-	t.validatePath(newPath)
-	dst := t.getOrCreateDest(newPath.GetNlri(), 64)
-	u := dst.Calculate(newPath)
-	if len(dst.knownPathList) == 0 {
-		t.deleteDest(dst)
-	}
-	return u
 }
 
 func (manager *TableManager) Update(newPath *Path) []*Update {
@@ -204,13 +210,13 @@ func (manager *TableManager) Update(newPath *Path) []*Update {
 
 	// Except for a special case with EVPN, we'll have one destination.
 	updates := make([]*Update, 0, 1)
-	family := newPath.GetRouteFamily()
-	if _, ok := manager.Tables[family]; ok {
-		updates = append(updates, manager.update(newPath))
+	family := newPath.GetFamily()
+	if table, ok := manager.Tables[family]; ok {
+		updates = append(updates, table.update(newPath))
 
 		if family == bgp.RF_EVPN {
 			for _, p := range manager.handleMacMobility(newPath) {
-				updates = append(updates, manager.update(p))
+				updates = append(updates, table.update(p))
 			}
 		}
 	}
@@ -237,24 +243,36 @@ func (manager *TableManager) handleMacMobility(path *Path) []*Path {
 	if path.IsWithdraw || path.IsLocal() || nlri.RouteType != bgp.EVPN_ROUTE_TYPE_MAC_IP_ADVERTISEMENT {
 		return nil
 	}
-	for _, path2 := range manager.GetPathList(GLOBAL_RIB_NAME, 0, []bgp.RouteFamily{bgp.RF_EVPN}) {
+
+	f := func(p *Path) (bgp.EthernetSegmentIdentifier, uint32, net.HardwareAddr, int, net.IP) {
+		nlri := p.GetNlri().(*bgp.EVPNNLRI)
+		d := nlri.RouteTypeData.(*bgp.EVPNMacIPAdvertisementRoute)
+		ecs := p.GetExtCommunities()
+		seq := -1
+		for _, ec := range ecs {
+			if t, st := ec.GetTypes(); t == bgp.EC_TYPE_EVPN && st == bgp.EC_SUBTYPE_MAC_MOBILITY {
+				seq = int(ec.(*bgp.MacMobilityExtended).Sequence)
+				break
+			}
+		}
+		return d.ESI, d.ETag, d.MacAddress, seq, p.GetSource().Address
+	}
+	e1, et1, m1, s1, i1 := f(path)
+
+	// Extract the route targets to scope the lookup to the MAC-VRF with the MAC address.
+	// This will help large EVPN instances where a single MAC is present in a lot of MAC-VRFs (e.g.
+	// an anycast router).
+	// A route may have multiple route targets, to target multiple MAC-VRFs (e.g. in both an L2VNI
+	// and L3VNI in the VXLAN case).
+	var paths []*Path
+	for _, ec := range path.GetRouteTargets() {
+		paths = append(paths, manager.GetPathListWithMac(GLOBAL_RIB_NAME, 0, []bgp.Family{bgp.RF_EVPN}, ec, m1)...)
+	}
+
+	for _, path2 := range paths {
 		if !path2.IsLocal() || path2.GetNlri().(*bgp.EVPNNLRI).RouteType != bgp.EVPN_ROUTE_TYPE_MAC_IP_ADVERTISEMENT {
 			continue
 		}
-		f := func(p *Path) (bgp.EthernetSegmentIdentifier, uint32, net.HardwareAddr, int, net.IP) {
-			nlri := p.GetNlri().(*bgp.EVPNNLRI)
-			d := nlri.RouteTypeData.(*bgp.EVPNMacIPAdvertisementRoute)
-			ecs := p.GetExtCommunities()
-			seq := -1
-			for _, ec := range ecs {
-				if t, st := ec.GetTypes(); t == bgp.EC_TYPE_EVPN && st == bgp.EC_SUBTYPE_MAC_MOBILITY {
-					seq = int(ec.(*bgp.MacMobilityExtended).Sequence)
-					break
-				}
-			}
-			return d.ESI, d.ETag, d.MacAddress, seq, p.info.source.Address
-		}
-		e1, et1, m1, s1, i1 := f(path)
 		e2, et2, m2, s2, i2 := f(path2)
 		if et1 == et2 && bytes.Equal(m1, m2) && !bytes.Equal(e1.Value, e2.Value) {
 			if s1 > s2 || s1 == s2 && bytes.Compare(i1, i2) < 0 {
@@ -265,7 +283,7 @@ func (manager *TableManager) handleMacMobility(path *Path) []*Path {
 	return pathList
 }
 
-func (manager *TableManager) tables(list ...bgp.RouteFamily) []*Table {
+func (manager *TableManager) tables(list ...bgp.Family) []*Table {
 	l := make([]*Table, 0, len(manager.Tables))
 	if len(list) == 0 {
 		for _, v := range manager.Tables {
@@ -281,7 +299,7 @@ func (manager *TableManager) tables(list ...bgp.RouteFamily) []*Table {
 	return l
 }
 
-func (manager *TableManager) getDestinationCount(rfList []bgp.RouteFamily) int {
+func (manager *TableManager) getDestinationCount(rfList []bgp.Family) int {
 	count := 0
 	for _, t := range manager.tables(rfList...) {
 		count += len(t.GetDestinations())
@@ -289,7 +307,7 @@ func (manager *TableManager) getDestinationCount(rfList []bgp.RouteFamily) int {
 	return count
 }
 
-func (manager *TableManager) GetBestPathList(id string, as uint32, rfList []bgp.RouteFamily) []*Path {
+func (manager *TableManager) GetBestPathList(id string, as uint32, rfList []bgp.Family) []*Path {
 	if SelectionOptions.DisableBestPathSelection {
 		// Note: If best path selection disabled, there is no best path.
 		return nil
@@ -301,7 +319,7 @@ func (manager *TableManager) GetBestPathList(id string, as uint32, rfList []bgp.
 	return paths
 }
 
-func (manager *TableManager) GetBestMultiPathList(id string, rfList []bgp.RouteFamily) [][]*Path {
+func (manager *TableManager) GetBestMultiPathList(id string, rfList []bgp.Family) [][]*Path {
 	if !UseMultiplePaths.Enabled || SelectionOptions.DisableBestPathSelection {
 		// Note: If multi path not enabled or best path selection disabled,
 		// there is no best multi path.
@@ -314,7 +332,7 @@ func (manager *TableManager) GetBestMultiPathList(id string, rfList []bgp.RouteF
 	return paths
 }
 
-func (manager *TableManager) GetPathList(id string, as uint32, rfList []bgp.RouteFamily) []*Path {
+func (manager *TableManager) GetPathList(id string, as uint32, rfList []bgp.Family) []*Path {
 	paths := make([]*Path, 0, manager.getDestinationCount(rfList))
 	for _, t := range manager.tables(rfList...) {
 		paths = append(paths, t.GetKnownPathList(id, as)...)
@@ -322,7 +340,15 @@ func (manager *TableManager) GetPathList(id string, as uint32, rfList []bgp.Rout
 	return paths
 }
 
-func (manager *TableManager) GetPathListWithNexthop(id string, rfList []bgp.RouteFamily, nexthop net.IP) []*Path {
+func (manager *TableManager) GetPathListWithMac(id string, as uint32, rfList []bgp.Family, rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr) []*Path {
+	var paths []*Path
+	for _, t := range manager.tables(rfList...) {
+		paths = append(paths, t.GetKnownPathListWithMac(id, as, rt, mac, false)...)
+	}
+	return paths
+}
+
+func (manager *TableManager) GetPathListWithNexthop(id string, rfList []bgp.Family, nexthop net.IP) []*Path {
 	paths := make([]*Path, 0, manager.getDestinationCount(rfList))
 	for _, rf := range rfList {
 		if t, ok := manager.Tables[rf]; ok {
@@ -336,7 +362,7 @@ func (manager *TableManager) GetPathListWithNexthop(id string, rfList []bgp.Rout
 	return paths
 }
 
-func (manager *TableManager) GetPathListWithSource(id string, rfList []bgp.RouteFamily, source *PeerInfo) []*Path {
+func (manager *TableManager) GetPathListWithSource(id string, rfList []bgp.Family, source *PeerInfo) []*Path {
 	paths := make([]*Path, 0, manager.getDestinationCount(rfList))
 	for _, rf := range rfList {
 		if t, ok := manager.Tables[rf]; ok {
@@ -354,7 +380,7 @@ func (manager *TableManager) GetDestination(path *Path) *Destination {
 	if path == nil {
 		return nil
 	}
-	family := path.GetRouteFamily()
+	family := path.GetFamily()
 	t, ok := manager.Tables[family]
 	if !ok {
 		return nil

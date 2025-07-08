@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osrg/gobgp/internal/pkg/config"
-	"github.com/osrg/gobgp/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -46,14 +46,13 @@ func TestPathCreatePath(t *testing.T) {
 	nlri_info := nlriList[0]
 	path := NewPath(peerP[0], nlri_info, false, pathAttributes, time.Now(), false)
 	assert.NotNil(t, path)
-
 }
 
 func TestPathGetPrefix(t *testing.T) {
 	peerP := PathCreatePeer()
 	pathP := PathCreatePath(peerP)
 	prefix := "10.10.10.0/24"
-	r_prefix := pathP[0].getPrefix()
+	r_prefix := pathP[0].GetPrefix()
 	assert.Equal(t, r_prefix, prefix)
 }
 
@@ -73,7 +72,8 @@ func TestASPathLen(t *testing.T) {
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SEQ, []uint16{65001, 65002, 65003, 65004, 65004, 65004, 65004, 65004, 65005}),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SET, []uint16{65001, 65002, 65003, 65004, 65005}),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SEQ, []uint16{65100, 65101, 65102}),
-		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101})}
+		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101}),
+	}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
 	nexthop := bgp.NewPathAttributeNextHop("192.168.50.1")
 	med := bgp.NewPathAttributeMultiExitDisc(0)
@@ -88,7 +88,7 @@ func TestASPathLen(t *testing.T) {
 	nlri := []*bgp.IPAddrPrefix{bgp.NewIPAddrPrefix(24, "10.10.10.0")}
 	bgpmsg := bgp.NewBGPUpdateMessage(nil, pathAttributes, nlri)
 	update := bgpmsg.Body.(*bgp.BGPUpdate)
-	UpdatePathAttrs4ByteAs(update)
+	UpdatePathAttrs4ByteAs(logger, update)
 	peer := PathCreatePeer()
 	p := NewPath(peer[0], update.NLRI[0], false, update.PathAttributes, time.Now(), false)
 	assert.Equal(10, p.GetAsPathLen())
@@ -101,7 +101,8 @@ func TestPathPrependAsnToExistingSeqAttr(t *testing.T) {
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SEQ, []uint16{65001, 65002, 65003, 65004, 65005}),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SET, []uint16{65001, 65002, 65003, 65004, 65005}),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SEQ, []uint16{65100, 65101, 65102}),
-		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101})}
+		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101}),
+	}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
 	nexthop := bgp.NewPathAttributeNextHop("192.168.50.1")
 
@@ -114,7 +115,7 @@ func TestPathPrependAsnToExistingSeqAttr(t *testing.T) {
 	nlri := []*bgp.IPAddrPrefix{bgp.NewIPAddrPrefix(24, "10.10.10.0")}
 	bgpmsg := bgp.NewBGPUpdateMessage(nil, pathAttributes, nlri)
 	update := bgpmsg.Body.(*bgp.BGPUpdate)
-	UpdatePathAttrs4ByteAs(update)
+	UpdatePathAttrs4ByteAs(logger, update)
 	peer := PathCreatePeer()
 	p := NewPath(peer[0], update.NLRI[0], false, update.PathAttributes, time.Now(), false)
 
@@ -135,7 +136,7 @@ func TestPathPrependAsnToNewAsPathAttr(t *testing.T) {
 	nlri := []*bgp.IPAddrPrefix{bgp.NewIPAddrPrefix(24, "10.10.10.0")}
 	bgpmsg := bgp.NewBGPUpdateMessage(nil, pathAttributes, nlri)
 	update := bgpmsg.Body.(*bgp.BGPUpdate)
-	UpdatePathAttrs4ByteAs(update)
+	UpdatePathAttrs4ByteAs(logger, update)
 	peer := PathCreatePeer()
 	p := NewPath(peer[0], update.NLRI[0], false, update.PathAttributes, time.Now(), false)
 
@@ -150,7 +151,8 @@ func TestPathPrependAsnToNewAsPathSeq(t *testing.T) {
 	aspathParam := []bgp.AsPathParamInterface{
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SET, []uint16{65001, 65002, 65003, 65004, 65005}),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SEQ, []uint16{65100, 65101, 65102}),
-		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101})}
+		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101}),
+	}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
 	nexthop := bgp.NewPathAttributeNextHop("192.168.50.1")
 
@@ -163,7 +165,7 @@ func TestPathPrependAsnToNewAsPathSeq(t *testing.T) {
 	nlri := []*bgp.IPAddrPrefix{bgp.NewIPAddrPrefix(24, "10.10.10.0")}
 	bgpmsg := bgp.NewBGPUpdateMessage(nil, pathAttributes, nlri)
 	update := bgpmsg.Body.(*bgp.BGPUpdate)
-	UpdatePathAttrs4ByteAs(update)
+	UpdatePathAttrs4ByteAs(logger, update)
 	peer := PathCreatePeer()
 	p := NewPath(peer[0], update.NLRI[0], false, update.PathAttributes, time.Now(), false)
 
@@ -179,7 +181,8 @@ func TestPathPrependAsnToEmptyAsPathAttr(t *testing.T) {
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SEQ, []uint16{}),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SET, []uint16{65001, 65002, 65003, 65004, 65005}),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SEQ, []uint16{65100, 65101, 65102}),
-		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101})}
+		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101}),
+	}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
 	nexthop := bgp.NewPathAttributeNextHop("192.168.50.1")
 
@@ -192,7 +195,7 @@ func TestPathPrependAsnToEmptyAsPathAttr(t *testing.T) {
 	nlri := []*bgp.IPAddrPrefix{bgp.NewIPAddrPrefix(24, "10.10.10.0")}
 	bgpmsg := bgp.NewBGPUpdateMessage(nil, pathAttributes, nlri)
 	update := bgpmsg.Body.(*bgp.BGPUpdate)
-	UpdatePathAttrs4ByteAs(update)
+	UpdatePathAttrs4ByteAs(logger, update)
 	peer := PathCreatePeer()
 	p := NewPath(peer[0], update.NLRI[0], false, update.PathAttributes, time.Now(), false)
 
@@ -214,7 +217,8 @@ func TestPathPrependAsnToFullPathAttr(t *testing.T) {
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SEQ, asns),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_SET, []uint16{65001, 65002, 65003, 65004, 65005}),
 		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SEQ, []uint16{65100, 65101, 65102}),
-		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101})}
+		bgp.NewAsPathParam(bgp.BGP_ASPATH_ATTR_TYPE_CONFED_SET, []uint16{65100, 65101}),
+	}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
 	nexthop := bgp.NewPathAttributeNextHop("192.168.50.1")
 
@@ -227,7 +231,7 @@ func TestPathPrependAsnToFullPathAttr(t *testing.T) {
 	nlri := []*bgp.IPAddrPrefix{bgp.NewIPAddrPrefix(24, "10.10.10.0")}
 	bgpmsg := bgp.NewBGPUpdateMessage(nil, pathAttributes, nlri)
 	update := bgpmsg.Body.(*bgp.BGPUpdate)
-	UpdatePathAttrs4ByteAs(update)
+	UpdatePathAttrs4ByteAs(logger, update)
 	peer := PathCreatePeer()
 	p := NewPath(peer[0], update.NLRI[0], false, update.PathAttributes, time.Now(), false)
 
@@ -273,7 +277,6 @@ func PathCreatePath(peerP []*PeerInfo) []*Path {
 }
 
 func updateMsgP1() *bgp.BGPMessage {
-
 	origin := bgp.NewPathAttributeOrigin(0)
 	aspathParam := []bgp.AsPathParamInterface{bgp.NewAsPathParam(2, []uint16{65000})}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
@@ -292,7 +295,6 @@ func updateMsgP1() *bgp.BGPMessage {
 }
 
 func updateMsgP2() *bgp.BGPMessage {
-
 	origin := bgp.NewPathAttributeOrigin(0)
 	aspathParam := []bgp.AsPathParamInterface{bgp.NewAsPathParam(2, []uint16{65100})}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
@@ -335,14 +337,14 @@ func TestRemovePrivateAS(t *testing.T) {
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
 	nlri := bgp.NewIPAddrPrefix(24, "30.30.30.0")
 	path := NewPath(nil, nlri, false, []bgp.PathAttributeInterface{aspath}, time.Now(), false)
-	path.RemovePrivateAS(10, config.REMOVE_PRIVATE_AS_OPTION_ALL)
+	path.RemovePrivateAS(10, oc.REMOVE_PRIVATE_AS_OPTION_ALL)
 	list := path.GetAsList()
 	assert.Equal(t, len(list), 2)
 	assert.Equal(t, list[0], uint32(1))
 	assert.Equal(t, list[1], uint32(2))
 
 	path = NewPath(nil, nlri, false, []bgp.PathAttributeInterface{aspath}, time.Now(), false)
-	path.RemovePrivateAS(10, config.REMOVE_PRIVATE_AS_OPTION_REPLACE)
+	path.RemovePrivateAS(10, oc.REMOVE_PRIVATE_AS_OPTION_REPLACE)
 	list = path.GetAsList()
 	assert.Equal(t, len(list), 4)
 	assert.Equal(t, list[0], uint32(10))
@@ -382,4 +384,13 @@ func TestNLRIToIPNet(t *testing.T) {
 	_, n4, _ := net.ParseCIDR("2806:106e:19::/48")
 	ipNet = nlriToIPNet(bgp.NewLabeledIPv6AddrPrefix(48, "2806:106e:19::", *labels))
 	assert.Equal(t, n4, ipNet)
+
+	rd, _ := bgp.ParseRouteDistinguisher("100:100")
+	_, n5, _ := net.ParseCIDR("40.40.40.0/24")
+	ipNet = nlriToIPNet(bgp.NewLabeledVPNIPAddrPrefix(24, "40.40.40.0", *labels, rd))
+	assert.Equal(t, n5, ipNet)
+
+	_, n6, _ := net.ParseCIDR("2001:db8:53::/64")
+	ipNet = nlriToIPNet(bgp.NewLabeledVPNIPv6AddrPrefix(64, "2001:db8:53::", *labels, rd))
+	assert.Equal(t, n6, ipNet)
 }

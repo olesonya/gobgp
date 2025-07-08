@@ -20,30 +20,37 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
+	"time"
 
-	api "github.com/osrg/gobgp/api"
+	"github.com/osrg/gobgp/v4/api"
 	"github.com/spf13/cobra"
 )
 
 var globalOpts struct {
-	Host         string
-	Port         int
-	Debug        bool
-	Quiet        bool
-	Json         bool
-	GenCmpl      bool
-	BashCmplFile string
-	PprofPort    int
-	TLS          bool
-	CaFile       string
+	Host           string
+	Port           int
+	Target         string
+	Debug          bool
+	Quiet          bool
+	Json           bool
+	GenCmpl        bool
+	BashCmplFile   string
+	PprofPort      int
+	TLS            bool
+	ClientCertFile string
+	ClientKeyFile  string
+	CaFile         string
 }
 
-var client api.GobgpApiClient
-var ctx context.Context
+var (
+	client api.GoBgpServiceClient
+	ctx    context.Context
+)
 
 func newRootCmd() *cobra.Command {
 	cobra.EnablePrefixMatching = true
-	var cancel context.CancelFunc
+	cleanup := func() {}
+
 	rootCmd := &cobra.Command{
 		Use: "gobgp",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -57,32 +64,34 @@ func newRootCmd() *cobra.Command {
 			}
 
 			if !globalOpts.GenCmpl {
-				var err error
-				ctx = context.Background()
-				client, cancel, err = newClient(ctx)
+				conn, err := newConn()
 				if err != nil {
-					cancel()
 					exitWithError(err)
+				}
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(context.Background(), time.Second*10)
+				client = api.NewGoBgpServiceClient(conn)
+				cleanup = func() {
+					conn.Close()
+					cancel()
 				}
 			}
 		},
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if globalOpts.GenCmpl {
-				cmd.GenBashCompletionFile(globalOpts.BashCmplFile)
-			} else {
-				cmd.HelpFunc()(cmd, args)
+				return cmd.GenBashCompletionFile(globalOpts.BashCmplFile)
 			}
+			cmd.HelpFunc()(cmd, args)
+			return nil
 		},
 		PersistentPostRun: func(cmd *cobra.Command, args []string) {
-			// if children declare their own, cancel is not called. Doesn't matter because the command will exit soon.
-			if cancel != nil {
-				cancel()
-			}
+			defer cleanup()
 		},
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&globalOpts.Host, "host", "u", "127.0.0.1", "host")
 	rootCmd.PersistentFlags().IntVarP(&globalOpts.Port, "port", "p", 50051, "port")
+	rootCmd.PersistentFlags().StringVarP(&globalOpts.Target, "target", "", "", "alternative to host/port when using UDS. Ex: unix:///var/run/go-bgp.sock if running gobgpd with a UDS socket.")
 	rootCmd.PersistentFlags().BoolVarP(&globalOpts.Json, "json", "j", false, "use json format to output format")
 	rootCmd.PersistentFlags().BoolVarP(&globalOpts.Debug, "debug", "d", false, "use debug")
 	rootCmd.PersistentFlags().BoolVarP(&globalOpts.Quiet, "quiet", "q", false, "use quiet")
@@ -90,6 +99,8 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().StringVarP(&globalOpts.BashCmplFile, "bash-cmpl-file", "", "gobgp-completion.bash", "bash cmpl filename")
 	rootCmd.PersistentFlags().IntVarP(&globalOpts.PprofPort, "pprof-port", "r", 0, "pprof port")
 	rootCmd.PersistentFlags().BoolVarP(&globalOpts.TLS, "tls", "", false, "connection uses TLS if true, else plain TCP")
+	rootCmd.PersistentFlags().StringVarP(&globalOpts.ClientCertFile, "tls-client-cert-file", "", "", "Optional file path to TLS client certificate")
+	rootCmd.PersistentFlags().StringVarP(&globalOpts.ClientKeyFile, "tls-client-key-file", "", "", "Optional file path to TLS client key")
 	rootCmd.PersistentFlags().StringVarP(&globalOpts.CaFile, "tls-ca-file", "", "", "The file containing the CA root cert file")
 
 	globalCmd := newGlobalCmd()

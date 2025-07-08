@@ -20,9 +20,9 @@ import (
 	"sort"
 
 	"github.com/k-sone/critbitgo"
-	"github.com/osrg/gobgp/internal/pkg/config"
-	"github.com/osrg/gobgp/pkg/packet/bgp"
-	log "github.com/sirupsen/logrus"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
+	"github.com/osrg/gobgp/v4/pkg/log"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
 
 type ROA struct {
@@ -69,15 +69,17 @@ func (r *roaBucket) GetEntries() []*ROA {
 }
 
 type ROATable struct {
-	trees map[bgp.RouteFamily]*critbitgo.Net
+	trees  map[bgp.Family]*critbitgo.Net
+	logger log.Logger
 }
 
-func NewROATable() *ROATable {
-	m := make(map[bgp.RouteFamily]*critbitgo.Net)
+func NewROATable(logger log.Logger) *ROATable {
+	m := make(map[bgp.Family]*critbitgo.Net)
 	m[bgp.RF_IPv4_UC] = critbitgo.NewNet()
 	m[bgp.RF_IPv6_UC] = critbitgo.NewNet()
 	return &ROATable{
-		trees: m,
+		trees:  m,
+		logger: logger,
 	}
 }
 
@@ -97,7 +99,16 @@ func (rt *ROATable) getBucket(roa *ROA) *roaBucket {
 			network: roa.Network,
 			entries: make([]*ROA, 0),
 		}
-		tree.Add(roa.Network, b)
+		if err := tree.Add(roa.Network, b); err != nil {
+			rt.logger.Error("Failed to add ROA",
+				log.Fields{
+					"Topic":   "rpki",
+					"Network": roa.Network.String(),
+					"AS":      roa.AS,
+					"MaxLen":  roa.MaxLen,
+					"Error":   err,
+				})
+		}
 		return b
 	}
 	return b.(*roaBucket)
@@ -140,18 +151,19 @@ func (rt *ROATable) Delete(roa *ROA) {
 			}
 		}
 	}
-	log.WithFields(log.Fields{
-		"Topic":      "rpki",
-		"Network":    roa.Network.String(),
-		"AS":         roa.AS,
-		"Max Length": roa.MaxLen,
-	}).Info("Can't withdraw a ROA")
+	rt.logger.Info("Can't withdraw a ROA",
+		log.Fields{
+			"Topic":      "rpki",
+			"Network":    roa.Network.String(),
+			"AS":         roa.AS,
+			"Max Length": roa.MaxLen,
+		})
 }
 
 func (rt *ROATable) DeleteAll(network string) {
 	for _, tree := range rt.trees {
 		deleteNetworks := make([]*net.IPNet, 0, tree.Size())
-		tree.Walk(nil, func(n *net.IPNet, v interface{}) bool {
+		tree.Walk(nil, func(n *net.IPNet, v any) bool {
 			b, _ := v.(*roaBucket)
 			newEntries := make([]*ROA, 0, len(b.entries))
 			for _, r := range b.entries {
@@ -167,7 +179,14 @@ func (rt *ROATable) DeleteAll(network string) {
 			return true
 		})
 		for _, key := range deleteNetworks {
-			tree.Delete(key)
+			if _, _, err := tree.Delete(key); err != nil {
+				rt.logger.Error("Failed to delete ROA",
+					log.Fields{
+						"Topic":   "rpki",
+						"Network": key.String(),
+						"Error":   err,
+					})
+			}
 		}
 	}
 }
@@ -177,7 +196,7 @@ func (rt *ROATable) Validate(path *Path) *Validation {
 		// RPKI isn't enabled or invalid path
 		return nil
 	}
-	tree, ok := rt.trees[path.GetRouteFamily()]
+	tree, ok := rt.trees[path.GetFamily()]
 	if !ok {
 		return nil
 	}
@@ -187,7 +206,7 @@ func (rt *ROATable) Validate(path *Path) *Validation {
 	var as uint32
 
 	validation := &Validation{
-		Status:          config.RPKI_VALIDATION_RESULT_TYPE_NOT_FOUND,
+		Status:          oc.RPKI_VALIDATION_RESULT_TYPE_NOT_FOUND,
 		Reason:          RPKI_VALIDATION_REASON_TYPE_NONE,
 		Matched:         make([]*ROA, 0),
 		UnmatchedLength: make([]*ROA, 0),
@@ -216,7 +235,7 @@ func (rt *ROATable) Validate(path *Path) *Validation {
 	r := nlriToIPNet(path.GetNlri())
 	prefixLen, _ := r.Mask.Size()
 	var bucket *roaBucket
-	tree.WalkMatch(r, func(r *net.IPNet, v interface{}) bool {
+	tree.WalkMatch(r, func(r *net.IPNet, v any) bool {
 		bucket, _ = v.(*roaBucket)
 		for _, r := range bucket.entries {
 			if prefixLen <= int(r.MaxLen) {
@@ -233,28 +252,28 @@ func (rt *ROATable) Validate(path *Path) *Validation {
 	})
 
 	if len(validation.Matched) != 0 {
-		validation.Status = config.RPKI_VALIDATION_RESULT_TYPE_VALID
+		validation.Status = oc.RPKI_VALIDATION_RESULT_TYPE_VALID
 		validation.Reason = RPKI_VALIDATION_REASON_TYPE_NONE
 	} else if len(validation.UnmatchedAs) != 0 {
-		validation.Status = config.RPKI_VALIDATION_RESULT_TYPE_INVALID
+		validation.Status = oc.RPKI_VALIDATION_RESULT_TYPE_INVALID
 		validation.Reason = RPKI_VALIDATION_REASON_TYPE_AS
 	} else if len(validation.UnmatchedLength) != 0 {
-		validation.Status = config.RPKI_VALIDATION_RESULT_TYPE_INVALID
+		validation.Status = oc.RPKI_VALIDATION_RESULT_TYPE_INVALID
 		validation.Reason = RPKI_VALIDATION_REASON_TYPE_LENGTH
 	} else {
-		validation.Status = config.RPKI_VALIDATION_RESULT_TYPE_NOT_FOUND
+		validation.Status = oc.RPKI_VALIDATION_RESULT_TYPE_NOT_FOUND
 		validation.Reason = RPKI_VALIDATION_REASON_TYPE_NONE
 	}
 
 	return validation
 }
 
-func (rt *ROATable) Info(family bgp.RouteFamily) (map[string]uint32, map[string]uint32) {
+func (rt *ROATable) Info(family bgp.Family) (map[string]uint32, map[string]uint32) {
 	records := make(map[string]uint32)
 	prefixes := make(map[string]uint32)
 
 	if tree, ok := rt.trees[family]; ok {
-		tree.Walk(nil, func(_ *net.IPNet, v interface{}) bool {
+		tree.Walk(nil, func(_ *net.IPNet, v any) bool {
 			b, _ := v.(*roaBucket)
 			tmpRecords := make(map[string]uint32)
 			for _, roa := range b.entries {
@@ -273,20 +292,20 @@ func (rt *ROATable) Info(family bgp.RouteFamily) (map[string]uint32, map[string]
 	return records, prefixes
 }
 
-func (rt *ROATable) List(family bgp.RouteFamily) ([]*ROA, error) {
-	var rfList []bgp.RouteFamily
+func (rt *ROATable) List(family bgp.Family) ([]*ROA, error) {
+	var rfList []bgp.Family
 	switch family {
 	case bgp.RF_IPv4_UC:
-		rfList = []bgp.RouteFamily{bgp.RF_IPv4_UC}
+		rfList = []bgp.Family{bgp.RF_IPv4_UC}
 	case bgp.RF_IPv6_UC:
-		rfList = []bgp.RouteFamily{bgp.RF_IPv6_UC}
+		rfList = []bgp.Family{bgp.RF_IPv6_UC}
 	default:
-		rfList = []bgp.RouteFamily{bgp.RF_IPv4_UC, bgp.RF_IPv6_UC}
+		rfList = []bgp.Family{bgp.RF_IPv4_UC, bgp.RF_IPv6_UC}
 	}
 	l := make([]*ROA, 0)
 	for _, rf := range rfList {
 		if tree, ok := rt.trees[rf]; ok {
-			tree.Walk(nil, func(_ *net.IPNet, v interface{}) bool {
+			tree.Walk(nil, func(_ *net.IPNet, v any) bool {
 				b, _ := v.(*roaBucket)
 				l = append(l, b.entries...)
 				return true

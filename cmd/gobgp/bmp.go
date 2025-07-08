@@ -17,13 +17,50 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 
-	api "github.com/osrg/gobgp/api"
-	"github.com/osrg/gobgp/pkg/packet/bmp"
+	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/packet/bmp"
 	"github.com/spf13/cobra"
 )
+
+func showStations() error {
+	stream, err := client.ListBmp(ctx, &api.ListBmpRequest{})
+	if err != nil {
+		fmt.Println(err)
+		return err
+	}
+	stations := make([]*api.ListBmpResponse_BmpStation, 0)
+	for {
+		rsp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		}
+		stations = append(stations, rsp.Station)
+	}
+	format := "%-23s %-6s %-10s\n"
+	fmt.Printf(format, "Session", "State", "Uptime")
+	for _, r := range stations {
+		s := "Down"
+		uptime := "Never"
+		if r.State.Uptime.AsTime().Unix() != 0 {
+			uptime = fmt.Sprint(formatTimedelta(r.State.Uptime.AsTime()))
+			if r.State.Uptime.AsTime().After(r.State.Downtime.AsTime()) {
+				s = "Up"
+			} else {
+				uptime = fmt.Sprint(formatTimedelta(r.State.Downtime.AsTime()))
+				s = "Down"
+			}
+		}
+		fmt.Printf(format, net.JoinHostPort(r.Conf.Address, fmt.Sprintf("%d", r.Conf.Port)), s, uptime)
+	}
+
+	return nil
+}
 
 func modBmpServer(cmdType string, args []string) error {
 	if len(args) < 1 {
@@ -56,17 +93,19 @@ func modBmpServer(cmdType string, args []string) error {
 			return fmt.Errorf("invalid statistics-timeout value. it must be in the range 0-65535. default value is 0 and means disabled")
 		}
 
-		policyType := api.AddBmpRequest_PRE
+		policyType := api.AddBmpRequest_MONITORING_POLICY_PRE
 		if len(args) > 1 {
 			switch args[1] {
+			case "pre":
+				policyType = api.AddBmpRequest_MONITORING_POLICY_PRE
 			case "post":
-				policyType = api.AddBmpRequest_POST
+				policyType = api.AddBmpRequest_MONITORING_POLICY_POST
 			case "both":
-				policyType = api.AddBmpRequest_BOTH
+				policyType = api.AddBmpRequest_MONITORING_POLICY_BOTH
 			case "local-rib":
-				policyType = api.AddBmpRequest_LOCAL
+				policyType = api.AddBmpRequest_MONITORING_POLICY_LOCAL
 			case "all":
-				policyType = api.AddBmpRequest_ALL
+				policyType = api.AddBmpRequest_MONITORING_POLICY_ALL
 			default:
 				return fmt.Errorf("invalid bmp policy type. valid type is {pre|post|both|local-rib|all}")
 			}
@@ -89,6 +128,9 @@ func modBmpServer(cmdType string, args []string) error {
 func newBmpCmd() *cobra.Command {
 	bmpCmd := &cobra.Command{
 		Use: cmdBMP,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return showStations()
+		},
 	}
 
 	for _, w := range []string{cmdAdd, cmdDel} {

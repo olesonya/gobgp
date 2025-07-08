@@ -16,9 +16,12 @@
 package main
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strconv"
@@ -27,11 +30,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	api "github.com/osrg/gobgp/api"
-	"github.com/osrg/gobgp/internal/pkg/apiutil"
-	"github.com/osrg/gobgp/internal/pkg/table"
+	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/internal/pkg/table"
+	"github.com/osrg/gobgp/v4/pkg/apiutil"
 
-	"github.com/osrg/gobgp/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
 
 type extCommType int
@@ -46,12 +49,16 @@ const (
 	ctRT
 	ctEncap
 	ctESILabel
+	ctETree
+	ctMulticastFlags
 	ctRouterMAC
 	ctDefaultGateway
 	ctValid
 	ctNotFound
 	ctInvalid
 	ctColor
+	ctLb
+	ctMup
 )
 
 var extCommNameMap = map[extCommType]string{
@@ -64,12 +71,16 @@ var extCommNameMap = map[extCommType]string{
 	ctRT:             "rt",
 	ctEncap:          "encap",
 	ctESILabel:       "esi-label",
+	ctETree:          "etree",
+	ctMulticastFlags: "multicast-flags",
 	ctRouterMAC:      "router-mac",
 	ctDefaultGateway: "default-gateway",
 	ctValid:          "valid",
 	ctNotFound:       "not-found",
 	ctInvalid:        "invalid",
 	ctColor:          "color",
+	ctLb:             "lb",
+	ctMup:            "mup",
 }
 
 var extCommValueMap = map[string]extCommType{
@@ -82,12 +93,16 @@ var extCommValueMap = map[string]extCommType{
 	extCommNameMap[ctRT]:             ctRT,
 	extCommNameMap[ctEncap]:          ctEncap,
 	extCommNameMap[ctESILabel]:       ctESILabel,
+	extCommNameMap[ctETree]:          ctETree,
+	extCommNameMap[ctMulticastFlags]: ctMulticastFlags,
 	extCommNameMap[ctRouterMAC]:      ctRouterMAC,
 	extCommNameMap[ctDefaultGateway]: ctDefaultGateway,
 	extCommNameMap[ctValid]:          ctValid,
 	extCommNameMap[ctNotFound]:       ctNotFound,
 	extCommNameMap[ctInvalid]:        ctInvalid,
 	extCommNameMap[ctColor]:          ctColor,
+	extCommNameMap[ctLb]:             ctLb,
+	extCommNameMap[ctMup]:            ctMup,
 }
 
 func rateLimitParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
@@ -206,6 +221,8 @@ func encapParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
 		typ = bgp.TUNNEL_TYPE_MPLS_IN_UDP
 	case "vxlan-gre":
 		typ = bgp.TUNNEL_TYPE_VXLAN_GRE
+	case "geneve":
+		typ = bgp.TUNNEL_TYPE_GENEVE
 	default:
 		return nil, fmt.Errorf("invalid encap type")
 	}
@@ -234,6 +251,55 @@ func esiLabelParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
 	o := &bgp.ESILabelExtended{
 		Label:          uint32(label),
 		IsSingleActive: isSingleActive,
+	}
+	return []bgp.ExtendedCommunityInterface{o}, nil
+}
+
+func eTreeParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
+	if len(args) < 2 || args[0] != extCommNameMap[ctETree] {
+		return nil, fmt.Errorf("invalid etree")
+	}
+	label, err := strconv.ParseUint(args[1], 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	isLeaf := false
+	if len(args) > 2 {
+		switch args[2] {
+		case "leaf":
+			isLeaf = true
+		case "root":
+			isLeaf = false
+		default:
+			return nil, fmt.Errorf("invalid etree")
+		}
+	}
+	o := &bgp.ETreeExtended{
+		Label:  uint32(label),
+		IsLeaf: isLeaf,
+	}
+	return []bgp.ExtendedCommunityInterface{o}, nil
+}
+
+func multicastFlagsParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
+	if len(args) < 2 || args[0] != extCommNameMap[ctMulticastFlags] {
+		return nil, fmt.Errorf("invalid multicast flags")
+	}
+	isIGMPProxy := false
+	isMLDProxy := false
+	if len(args) > 1 {
+		switch args[1] {
+		case "igmp-proxy":
+			isIGMPProxy = true
+		case "mld-proxy":
+			isMLDProxy = true
+		default:
+			return nil, fmt.Errorf("unknown multicast flag")
+		}
+	}
+	o := &bgp.MulticastFlagsExtended{
+		IsIGMPProxy: isIGMPProxy,
+		IsMLDProxy:  isMLDProxy,
 	}
 	return []bgp.ExtendedCommunityInterface{o}, nil
 }
@@ -286,6 +352,39 @@ func colorParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
 	return []bgp.ExtendedCommunityInterface{bgp.NewColorExtended(uint32(color))}, nil
 }
 
+func lbParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
+	if len(args) != 2 || args[0] != extCommNameMap[ctLb] {
+		return nil, fmt.Errorf("invalid link-bandwidth")
+	}
+
+	as, err := strconv.ParseUint(args[1], 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lb ASN")
+	}
+
+	bw, err := strconv.ParseFloat(args[2], 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lb bandwidth")
+	}
+	return []bgp.ExtendedCommunityInterface{bgp.NewLinkBandwidthExtended(uint16(as), float32(bw))}, nil
+}
+
+func mupParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
+	if len(args) != 2 || args[0] != extCommNameMap[ctMup] {
+		return nil, fmt.Errorf("invalid mup")
+	}
+	a := strings.Split(args[1], ":")
+	sid2, err := strconv.ParseUint(a[0], 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("invalid mup segment ID")
+	}
+	sid4, err := strconv.ParseUint(a[1], 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid mup segment ID")
+	}
+	return []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(uint16(sid2), uint32(sid4))}, nil
+}
+
 var extCommParserMap = map[extCommType]func([]string) ([]bgp.ExtendedCommunityInterface, error){
 	ctAccept:         nil,
 	ctDiscard:        rateLimitParser,
@@ -296,12 +395,16 @@ var extCommParserMap = map[extCommType]func([]string) ([]bgp.ExtendedCommunityIn
 	ctRT:             rtParser,
 	ctEncap:          encapParser,
 	ctESILabel:       esiLabelParser,
+	ctETree:          eTreeParser,
+	ctMulticastFlags: multicastFlagsParser,
 	ctRouterMAC:      routerMacParser,
 	ctDefaultGateway: defaultGatewayParser,
 	ctValid:          validationParser,
 	ctNotFound:       validationParser,
 	ctInvalid:        validationParser,
 	ctColor:          colorParser,
+	ctLb:             lbParser,
+	ctMup:            mupParser,
 }
 
 func parseExtendedCommunities(args []string) ([]bgp.ExtendedCommunityInterface, error) {
@@ -323,7 +426,7 @@ func parseExtendedCommunities(args []string) ([]bgp.ExtendedCommunityInterface, 
 		f := extCommParserMap[idx.t]
 		if i < len(idxs)-1 {
 			a = args[:idxs[i+1].i-idx.i]
-			args = args[(idxs[i+1].i - idx.i):]
+			args = args[idxs[i+1].i-idx.i:]
 		} else {
 			a = args
 			args = nil
@@ -343,23 +446,31 @@ func parseExtendedCommunities(args []string) ([]bgp.ExtendedCommunityInterface, 
 	return exts, nil
 }
 
-func parseFlowSpecArgs(rf bgp.RouteFamily, args []string) (bgp.AddrPrefixInterface, []string, error) {
+func parseFlowSpecArgs(rf bgp.Family, args []string) (bgp.AddrPrefixInterface, *bgp.PathAttributePrefixSID, []string, error) {
 	// Format:
 	// match <rule>... [then <action>...] [rd <rd>] [rt <rt>...]
+	// or
+	// match <rule>... then redirect <rt> [color <color>] [prefix <prefix>] [locator-node-length <length>] [function-length <length>] [behavior <behavior>]
 	req := 3 // match <key1> <arg1> [<key2> <arg2>...]
 	if len(args) < req {
-		return nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
+		return nil, nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
 	}
 	m, err := extractReserved(args, map[string]int{
-		"match": paramList,
-		"then":  paramList,
-		"rd":    paramSingle,
-		"rt":    paramList})
+		"match":               paramList,
+		"then":                paramList,
+		"rd":                  paramSingle,
+		"rt":                  paramList,
+		"color":               paramSingle,
+		"prefix":              paramSingle,
+		"locator-node-length": paramSingle,
+		"function-length":     paramSingle,
+		"behavior":            paramSingle,
+	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if len(m["match"]) == 0 {
-		return nil, nil, fmt.Errorf("specify filtering rules with keyword 'match'")
+		return nil, nil, nil, fmt.Errorf("specify filtering rules with keyword 'match'")
 	}
 
 	var rd bgp.RouteDistinguisherInterface
@@ -367,11 +478,11 @@ func parseFlowSpecArgs(rf bgp.RouteFamily, args []string) (bgp.AddrPrefixInterfa
 	switch rf {
 	case bgp.RF_FS_IPv4_VPN, bgp.RF_FS_IPv6_VPN, bgp.RF_FS_L2_VPN:
 		if len(m["rd"]) == 0 {
-			return nil, nil, fmt.Errorf("specify rd")
+			return nil, nil, nil, fmt.Errorf("specify rd")
 		}
 		var err error
 		if rd, err = bgp.ParseRouteDistinguisher(m["rd"][0]); err != nil {
-			return nil, nil, fmt.Errorf("invalid rd: %s", m["rd"][0])
+			return nil, nil, nil, fmt.Errorf("invalid rd: %s", m["rd"][0])
 		}
 		if len(m["rt"]) > 0 {
 			extcomms = append(extcomms, "rt")
@@ -379,16 +490,16 @@ func parseFlowSpecArgs(rf bgp.RouteFamily, args []string) (bgp.AddrPrefixInterfa
 		}
 	default:
 		if len(m["rd"]) > 0 {
-			return nil, nil, fmt.Errorf("cannot specify rd for %s", rf.String())
+			return nil, nil, nil, fmt.Errorf("cannot specify rd for %s", rf.String())
 		}
 		if len(m["rt"]) > 0 {
-			return nil, nil, fmt.Errorf("cannot specify rt for %s", rf.String())
+			return nil, nil, nil, fmt.Errorf("cannot specify rt for %s", rf.String())
 		}
 	}
 
 	rules, err := bgp.ParseFlowSpecComponents(rf, strings.Join(m["match"], " "))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	var nlri bgp.AddrPrefixInterface
@@ -404,10 +515,61 @@ func parseFlowSpecArgs(rf bgp.RouteFamily, args []string) (bgp.AddrPrefixInterfa
 	case bgp.RF_FS_L2_VPN:
 		nlri = bgp.NewFlowSpecL2VPN(rd, rules)
 	default:
-		return nil, nil, fmt.Errorf("invalid route family")
+		return nil, nil, nil, fmt.Errorf("invalid route family")
 	}
 
-	return nlri, extcomms, nil
+	var psid *bgp.PathAttributePrefixSID
+	hasAnySRv6PolicyParam := len(m["prefix"]) > 0 || len(m["locator-node-length"]) > 0 || len(m["function-length"]) > 0 || len(m["behavior"]) > 0
+
+	if len(m["then"]) != 0 && m["then"][0] == "redirect" {
+		if len(m["color"]) == 0 && hasAnySRv6PolicyParam {
+			return nil, nil, nil, fmt.Errorf("specify color")
+		}
+		if len(m["color"]) > 0 {
+			extcomms = append(extcomms, "color", m["color"][0])
+			if hasAnySRv6PolicyParam {
+				// Check if all optional SRv6 Policy parameters are specified.
+				required := []string{"prefix", "locator-node-length", "function-length", "behavior"}
+				for _, param := range required {
+					if len(m[param]) == 0 {
+						return nil, nil, nil, fmt.Errorf("specify %s", param)
+					}
+				}
+
+				sid, err := netip.ParsePrefix(m["prefix"][0])
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				nl, err := strconv.ParseUint(m["locator-node-length"][0], 10, 8)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				fl, err := strconv.ParseUint(m["function-length"][0], 10, 8)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				behavior, ok := api.SRV6Behavior_value["SRV6_BEHAVIOR_"+m["behavior"][0]]
+				if !ok {
+					return nil, nil, nil, fmt.Errorf("unknown behavior: %s", m["behavior"][0])
+				}
+
+				psid = bgp.NewPathAttributePrefixSID(
+					bgp.NewSRv6ServiceTLV(
+						bgp.TLVTypeSRv6L3Service,
+						bgp.NewSRv6InformationSubTLV(
+							sid.Addr(),
+							bgp.SRBehavior(behavior),
+							bgp.NewSRv6SIDStructureSubSubTLV(uint8(sid.Bits()), uint8(nl), uint8(fl), 0, 0, 0),
+						),
+					),
+				)
+			}
+		}
+	} else if hasAnySRv6PolicyParam {
+		return nil, nil, nil, fmt.Errorf("cannot specify %s for %s", strings.Join([]string{"prefix", "locator-node-length", "function-length", "behavior"}, ", "), m["then"][0])
+	}
+
+	return nlri, psid, extcomms, nil
 }
 
 func parseEvpnEthernetAutoDiscoveryArgs(args []string) (bgp.AddrPrefixInterface, []string, error) {
@@ -424,7 +586,8 @@ func parseEvpnEthernetAutoDiscoveryArgs(args []string) (bgp.AddrPrefixInterface,
 		"rd":        paramSingle,
 		"rt":        paramList,
 		"encap":     paramSingle,
-		"esi-label": paramSingle})
+		"esi-label": paramList,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -490,13 +653,15 @@ func parseEvpnMacAdvArgs(args []string) (bgp.AddrPrefixInterface, []string, erro
 		return nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
 	}
 	m, err := extractReserved(args, map[string]int{
-		"esi":        paramList,
-		"etag":       paramSingle,
-		"label":      paramSingle,
-		"rd":         paramSingle,
-		"rt":         paramList,
-		"encap":      paramSingle,
-		"router-mac": paramSingle})
+		"esi":             paramList,
+		"etag":            paramSingle,
+		"label":           paramSingle,
+		"rd":              paramSingle,
+		"rt":              paramList,
+		"encap":           paramSingle,
+		"router-mac":      paramSingle,
+		"default-gateway": paramFlag,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -585,11 +750,8 @@ func parseEvpnMacAdvArgs(args []string) (bgp.AddrPrefixInterface, []string, erro
 		extcomms = append(extcomms, "router-mac", m["router-mac"][0])
 	}
 
-	for _, a := range args {
-		if a == "default-gateway" {
-			extcomms = append(extcomms, "default-gateway")
-			break
-		}
+	if _, ok := m["default-gateway"]; ok {
+		extcomms = append(extcomms, "default-gateway")
 	}
 
 	r := &bgp.EVPNMacIPAdvertisementRoute{
@@ -618,7 +780,8 @@ func parseEvpnMulticastArgs(args []string) (bgp.AddrPrefixInterface, []string, e
 		"etag":  paramSingle,
 		"rd":    paramSingle,
 		"rt":    paramList,
-		"encap": paramSingle})
+		"encap": paramSingle,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -690,7 +853,8 @@ func parseEvpnEthernetSegmentArgs(args []string) (bgp.AddrPrefixInterface, []str
 		"esi":   paramList,
 		"rd":    paramSingle,
 		"rt":    paramList,
-		"encap": paramSingle})
+		"encap": paramSingle,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -758,7 +922,8 @@ func parseEvpnIPPrefixArgs(args []string) (bgp.AddrPrefixInterface, []string, er
 		"rd":         paramSingle,
 		"rt":         paramList,
 		"encap":      paramSingle,
-		"router-mac": paramSingle})
+		"router-mac": paramSingle,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -842,7 +1007,8 @@ func parseEvpnIPMSIArgs(args []string) (bgp.AddrPrefixInterface, []string, error
 		"etag":  paramSingle,
 		"rd":    paramSingle,
 		"rt":    paramSingle,
-		"encap": paramSingle})
+		"encap": paramSingle,
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -908,10 +1074,735 @@ func parseEvpnArgs(args []string) (bgp.AddrPrefixInterface, []string, error) {
 	return nil, nil, fmt.Errorf("invalid subtype. expect [macadv|multicast|prefix] but %s", subtype)
 }
 
+func parseMUPInterworkSegmentDiscoveryRouteArgs(args []string, afi uint16, nexthop string) (bgp.AddrPrefixInterface, *bgp.PathAttributePrefixSID, []string, error) {
+	// Format:
+	// <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...]
+	req := 13
+	if len(args) < req {
+		return nil, nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
+	}
+	m, err := extractReserved(args, map[string]int{
+		"rd":                  paramSingle,
+		"prefix":              paramSingle,
+		"locator-node-length": paramSingle,
+		"function-length":     paramSingle,
+		"behavior":            paramSingle,
+		"rt":                  paramSingle,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(m[""]) < 1 {
+		return nil, nil, nil, fmt.Errorf("specify prefix")
+	}
+	for _, f := range []string{"rd", "prefix", "locator-node-length", "function-length", "rt"} {
+		for len(m[f]) == 0 {
+			return nil, nil, nil, fmt.Errorf("specify %s", f)
+		}
+	}
+	rd, err := bgp.ParseRouteDistinguisher(m["rd"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	prefix, err := netip.ParsePrefix(m[""][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	nh, err := netip.ParseAddr(nexthop)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if nh.Is4() {
+		return nil, nil, nil, fmt.Errorf("nexthop should be IPv6 address: %s", nexthop)
+	}
+	sid, err := netip.ParsePrefix(m["prefix"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	nl, err := strconv.ParseUint(m["locator-node-length"][0], 10, 8)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	fl, err := strconv.ParseUint(m["function-length"][0], 10, 8)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	behavior, ok := api.SRV6Behavior_value["SRV6_BEHAVIOR_"+m["behavior"][0]]
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("unknown behavior: %s", m["behavior"][0])
+	}
+	if (afi != bgp.AFI_IP || behavior != int32(bgp.ENDM_GTP4E)) && (afi != bgp.AFI_IP6 || behavior != int32(bgp.ENDM_GTP6E)) {
+		return nil, nil, nil, fmt.Errorf("invalid behavior: %s. behavior must be ENDM_GTP4E or ENDM_GTP6E", m["behavior"][0])
+	}
+	psid := bgp.NewPathAttributePrefixSID(
+		bgp.NewSRv6ServiceTLV(
+			bgp.TLVTypeSRv6L3Service,
+			bgp.NewSRv6InformationSubTLV(
+				sid.Addr(),
+				bgp.SRBehavior(behavior),
+				bgp.NewSRv6SIDStructureSubSubTLV(uint8(sid.Bits()), uint8(nl), uint8(fl), 0, 0, 0),
+			),
+		),
+	)
+
+	extcomms := make([]string, 0)
+	if len(m["rt"]) > 0 {
+		extcomms = append(extcomms, "rt")
+		extcomms = append(extcomms, m["rt"]...)
+	}
+
+	r := &bgp.MUPInterworkSegmentDiscoveryRoute{
+		RD:     rd,
+		Prefix: prefix,
+	}
+	return bgp.NewMUPNLRI(afi, bgp.MUP_ARCH_TYPE_UNDEFINED, bgp.MUP_ROUTE_TYPE_INTERWORK_SEGMENT_DISCOVERY, r), psid, extcomms, nil
+}
+
+func parseMUPDirectSegmentDiscoveryRouteArgs(args []string, afi uint16, nexthop string) (bgp.AddrPrefixInterface, *bgp.PathAttributePrefixSID, []string, error) {
+	// Format:
+	// <ip address> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup <segment identifier>]
+	req := 15
+	if len(args) < req {
+		return nil, nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
+	}
+	m, err := extractReserved(args, map[string]int{
+		"rd":                  paramSingle,
+		"rt":                  paramSingle,
+		"prefix":              paramSingle,
+		"locator-node-length": paramSingle,
+		"function-length":     paramSingle,
+		"behavior":            paramSingle,
+		"mup":                 paramSingle,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(m[""]) < 1 {
+		return nil, nil, nil, fmt.Errorf("specify address")
+	}
+	for _, f := range []string{"rd", "rt", "prefix", "locator-node-length", "function-length", "behavior", "mup"} {
+		for len(m[f]) == 0 {
+			return nil, nil, nil, fmt.Errorf("specify %s", f)
+		}
+	}
+	rd, err := bgp.ParseRouteDistinguisher(m["rd"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	addr, err := netip.ParseAddr(m[""][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	nh, err := netip.ParseAddr(nexthop)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if nh.Is4() {
+		return nil, nil, nil, fmt.Errorf("nexthop should be IPv6 address: %s", nexthop)
+	}
+	sid, err := netip.ParsePrefix(m["prefix"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	nl, err := strconv.ParseUint(m["locator-node-length"][0], 10, 8)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	fl, err := strconv.ParseUint(m["function-length"][0], 10, 8)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	behavior, ok := api.SRV6Behavior_value["SRV6_BEHAVIOR_"+m["behavior"][0]]
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("unknown behavior: %s", m["behavior"][0])
+	}
+	psid := bgp.NewPathAttributePrefixSID(
+		bgp.NewSRv6ServiceTLV(
+			bgp.TLVTypeSRv6L3Service,
+			bgp.NewSRv6InformationSubTLV(
+				sid.Addr(),
+				bgp.SRBehavior(behavior),
+				bgp.NewSRv6SIDStructureSubSubTLV(uint8(sid.Bits()), uint8(nl), uint8(fl), 0, 0, 0),
+			),
+		),
+	)
+
+	extcomms := make([]string, 0)
+	if len(m["rt"]) > 0 {
+		extcomms = append(extcomms, "rt")
+		extcomms = append(extcomms, m["rt"]...)
+	}
+	if len(m["mup"]) > 0 {
+		extcomms = append(extcomms, "mup", m["mup"][0])
+	}
+
+	r := &bgp.MUPDirectSegmentDiscoveryRoute{
+		RD:      rd,
+		Address: addr,
+	}
+	return bgp.NewMUPNLRI(afi, bgp.MUP_ARCH_TYPE_UNDEFINED, bgp.MUP_ROUTE_TYPE_DIRECT_SEGMENT_DISCOVERY, r), psid, extcomms, nil
+}
+
+func parseTeid(s string) (teid netip.Addr, err error) {
+	// Hex format
+	if s, ok := strings.CutPrefix(s, "0x"); ok {
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			return teid, err
+		}
+		if len(b) < 4 {
+			b = append(b, make([]byte, 4-len(b))...)
+		}
+		if teid, ok = netip.AddrFromSlice(b); ok {
+			return teid, nil
+		}
+	}
+	// IP address format
+	if teid, err = netip.ParseAddr(s); err == nil {
+		return teid, err
+	}
+	// Decimal format
+	b := [4]byte{}
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		return teid, err
+	}
+	binary.BigEndian.PutUint32(b[:], uint32(n))
+	teid = netip.AddrFrom4(b)
+	return teid, nil
+}
+
+func parseMUPType1SessionTransformedRouteArgs(args []string, afi uint16) (bgp.AddrPrefixInterface, *bgp.PathAttributePrefixSID, []string, error) {
+	// Format:
+	// <ip prefix> rd <rd> [rt <rt>...] teid <teid> qfi <qfi> endpoint <endpoint> [source <source>]
+	req := 5
+	if len(args) < req {
+		return nil, nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
+	}
+	m, err := extractReserved(args, map[string]int{
+		"rd":       paramSingle,
+		"rt":       paramSingle,
+		"teid":     paramSingle,
+		"qfi":      paramSingle,
+		"endpoint": paramSingle,
+		"source":   paramSingle,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(m[""]) < 1 {
+		return nil, nil, nil, fmt.Errorf("specify prefix")
+	}
+	for _, f := range []string{"rd", "rt", "teid", "qfi", "endpoint"} {
+		for len(m[f]) == 0 {
+			return nil, nil, nil, fmt.Errorf("specify %s", f)
+		}
+	}
+	rd, err := bgp.ParseRouteDistinguisher(m["rd"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	prefix, err := netip.ParsePrefix(m[""][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	teid, err := parseTeid(m["teid"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	qfi, err := strconv.ParseUint(m["qfi"][0], 10, 8)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ea, err := netip.ParseAddr(m["endpoint"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	extcomms := make([]string, 0)
+	if len(m["rt"]) > 0 {
+		extcomms = append(extcomms, "rt")
+		extcomms = append(extcomms, m["rt"]...)
+	}
+
+	r := &bgp.MUPType1SessionTransformedRoute{
+		RD:                    rd,
+		Prefix:                prefix,
+		TEID:                  teid,
+		QFI:                   uint8(qfi),
+		EndpointAddressLength: uint8(ea.BitLen()),
+		EndpointAddress:       ea,
+	}
+	if len(m["source"]) > 0 {
+		sa, err := netip.ParseAddr(m["source"][0])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		r.SourceAddressLength = uint8(sa.BitLen())
+		r.SourceAddress = &sa
+	}
+	return bgp.NewMUPNLRI(afi, bgp.MUP_ARCH_TYPE_UNDEFINED, bgp.MUP_ROUTE_TYPE_TYPE_1_SESSION_TRANSFORMED, r), nil, extcomms, nil
+}
+
+func parseMUPType2SessionTransformedRouteArgs(args []string, afi uint16) (bgp.AddrPrefixInterface, *bgp.PathAttributePrefixSID, []string, error) {
+	// Format:
+	// <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup <segment identifier>]
+	req := 6
+	if len(args) < req {
+		return nil, nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
+	}
+	m, err := extractReserved(args, map[string]int{
+		"rd":                      paramSingle,
+		"rt":                      paramSingle,
+		"endpoint-address-length": paramSingle,
+		"teid":                    paramSingle,
+		"mup":                     paramSingle,
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(m[""]) < 1 {
+		return nil, nil, nil, fmt.Errorf("specify endpoint")
+	}
+	for _, f := range []string{"rd", "rt", "endpoint-address-length", "teid", "mup"} {
+		for len(m[f]) == 0 {
+			return nil, nil, nil, fmt.Errorf("specify %s", f)
+		}
+	}
+	rd, err := bgp.ParseRouteDistinguisher(m["rd"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ea, err := netip.ParseAddr(m[""][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	eaLen, err := strconv.ParseUint(m["endpoint-address-length"][0], 10, 8)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if ea.Is4() && eaLen > 64 || ea.Is6() && eaLen > 160 {
+		return nil, nil, nil, fmt.Errorf("endpoint-address-length too large: %d", eaLen)
+	}
+	teid, err := parseTeid(m["teid"][0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	extcomms := make([]string, 0)
+	if len(m["rt"]) > 0 {
+		extcomms = append(extcomms, "rt")
+		extcomms = append(extcomms, m["rt"]...)
+	}
+	if len(m["mup"]) > 0 {
+		extcomms = append(extcomms, "mup", m["mup"][0])
+	}
+
+	r := &bgp.MUPType2SessionTransformedRoute{
+		RD:                    rd,
+		EndpointAddressLength: uint8(eaLen),
+		EndpointAddress:       ea,
+		TEID:                  teid,
+	}
+	return bgp.NewMUPNLRI(afi, bgp.MUP_ARCH_TYPE_UNDEFINED, bgp.MUP_ROUTE_TYPE_TYPE_2_SESSION_TRANSFORMED, r), nil, extcomms, nil
+}
+
+func parseMUPArgs(args []string, afi uint16, nexthop string) (bgp.AddrPrefixInterface, *bgp.PathAttributePrefixSID, []string, error) {
+	if len(args) < 1 {
+		return nil, nil, nil, fmt.Errorf("lack of args. need 1 but %d", len(args))
+	}
+	subtype := args[0]
+	args = args[1:]
+	switch subtype {
+	case "isd":
+		return parseMUPInterworkSegmentDiscoveryRouteArgs(args, afi, nexthop)
+	case "dsd":
+		return parseMUPDirectSegmentDiscoveryRouteArgs(args, afi, nexthop)
+	case "t1st":
+		return parseMUPType1SessionTransformedRouteArgs(args, afi)
+	case "t2st":
+		return parseMUPType2SessionTransformedRouteArgs(args, afi)
+	}
+	return nil, nil, nil, fmt.Errorf("invalid subtype. expect [isd|dsd|t1st|t2st] but %s", subtype)
+}
+
+func parseLsLinkNLRIType(args []string) (bgp.AddrPrefixInterface, *bgp.PathAttributeLs, error) {
+	// Format:
+	// <ip prefix> identifier <identifier> asn <asn> bgp-ls-id <bgp-ls-id> ospf
+	req := 26
+	if len(args) < req {
+		return nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
+	}
+
+	m, err := extractReserved(args, map[string]int{
+		"identifier":                      paramSingle,
+		"local-asn":                       paramSingle,
+		"local-bgp-ls-id":                 paramSingle,
+		"local-bgp-router-id":             paramSingle,
+		"local-bgp-confederation-member":  paramSingle,
+		"remote-asn":                      paramSingle,
+		"remote-bgp-ls-id":                paramSingle,
+		"remote-bgp-router-id":            paramSingle,
+		"remote-bgp-confederation-member": paramSingle,
+		"ipv4-interface-address":          paramSingle,
+		"ipv4-neighbor-address":           paramSingle,
+		"ipv6-interface-address":          paramSingle,
+		"ipv6-neighbor-address":           paramSingle,
+		"sid":                             paramSingle,
+		"sid-type":                        paramSingle,
+		"v-flag":                          paramFlag,
+		"l-flag":                          paramFlag,
+		"b-flag":                          paramFlag,
+		"p-flag":                          paramFlag,
+		"weight":                          paramSingle,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	identifier, err := strconv.ParseUint(m["identifier"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	localAsn, err := strconv.ParseUint(m["local-asn"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	localBgpLsId, err := strconv.ParseUint(m["local-bgp-ls-id"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	localBgpConfederationMember, err := strconv.ParseUint(m["local-bgp-confederation-member"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	lnd := &bgp.LsNodeDescriptor{
+		Asn:                    uint32(localAsn),
+		BGPLsID:                uint32(localBgpLsId),
+		OspfAreaID:             0,
+		PseudoNode:             false,
+		IGPRouterID:            "",
+		BGPRouterID:            net.ParseIP(m["local-bgp-router-id"][0]).To4(),
+		BGPConfederationMember: uint32(localBgpConfederationMember),
+	}
+	RemoteAsn, err := strconv.ParseUint(m["remote-asn"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	RemoteBgpLsId, err := strconv.ParseUint(m["remote-bgp-ls-id"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	RemoteBgpConfederationMember, err := strconv.ParseUint(m["remote-bgp-confederation-member"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	rnd := &bgp.LsNodeDescriptor{
+		Asn:                    uint32(RemoteAsn),
+		BGPLsID:                uint32(RemoteBgpLsId),
+		OspfAreaID:             0,
+		PseudoNode:             false,
+		IGPRouterID:            "",
+		BGPRouterID:            net.ParseIP(m["remote-bgp-router-id"][0]),
+		BGPConfederationMember: uint32(RemoteBgpConfederationMember),
+	}
+
+	var interfaceAddrIPv4 net.IP
+	var neighborAddrIPv4 net.IP
+	var interfaceAddrIPv6 net.IP
+	var neighborAddrIPv6 net.IP
+
+	interfaceAddrIPv4 = net.ParseIP(m["ipv4-interface-address"][0]).To4()
+	neighborAddrIPv4 = net.ParseIP(m["ipv4-neighbor-address"][0]).To4()
+	interfaceAddrIPv6 = net.ParseIP(m["ipv6-interface-address"][0]).To16()
+	neighborAddrIPv6 = net.ParseIP(m["ipv6-neighbor-address"][0]).To16()
+
+	ld := &bgp.LsLinkDescriptor{
+		LinkLocalID:       new(uint32),
+		LinkRemoteID:      new(uint32),
+		InterfaceAddrIPv4: &interfaceAddrIPv4,
+		NeighborAddrIPv4:  &neighborAddrIPv4,
+		InterfaceAddrIPv6: &interfaceAddrIPv6,
+		NeighborAddrIPv6:  &neighborAddrIPv6,
+	}
+
+	lndTLV := bgp.NewLsTLVNodeDescriptor(lnd, bgp.LS_TLV_LOCAL_NODE_DESC)
+	rndTLV := bgp.NewLsTLVNodeDescriptor(rnd, bgp.LS_TLV_REMOTE_NODE_DESC)
+	ldTLV := bgp.NewLsLinkTLVs(ld)
+
+	sidTypeString := m["sid-type"][0]
+
+	sidtype := lsTLVTypeSelect(sidTypeString)
+
+	var peerNodeFlag uint8
+
+	if _, ok := m["v-flag"]; ok {
+		peerNodeFlag = peerNodeFlag | 0x80
+	}
+	if _, ok := m["l-flag"]; ok {
+		peerNodeFlag = peerNodeFlag | 0x40
+	}
+	if _, ok := m["b-flag"]; ok {
+		peerNodeFlag = peerNodeFlag | 0x20
+	}
+	if _, ok := m["p-flag"]; ok {
+		peerNodeFlag = peerNodeFlag | 0x10
+	}
+
+	lsTLVWeight, err := strconv.ParseUint(m["weight"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	lsTLVSid, err := strconv.ParseUint(m["sid"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	const lsTlvLen = 7
+	const t = bgp.BGP_ATTR_TYPE_LS
+	const pathAttrHdrLen = 4
+	var tlvs []bgp.LsTLVInterface
+	length := uint16(pathAttrHdrLen + lsTlvLen)
+
+	switch sidtype {
+	case bgp.LS_TLV_PEER_NODE_SID:
+
+		lsTLV := &bgp.LsTLVPeerNodeSID{
+			LsTLV: bgp.LsTLV{
+				Type:   sidtype,
+				Length: uint16(lsTlvLen),
+			},
+			Flags:  peerNodeFlag,
+			Weight: uint8(lsTLVWeight),
+			SID:    uint32(lsTLVSid),
+		}
+		tlvs = append(tlvs, lsTLV)
+	case bgp.LS_TLV_ADJACENCY_SID:
+		lsTLV := &bgp.LsTLVAdjacencySID{
+			LsTLV: bgp.LsTLV{
+				Type:   sidtype,
+				Length: uint16(lsTlvLen),
+			},
+			Flags:  peerNodeFlag,
+			Weight: uint8(lsTLVWeight),
+			SID:    uint32(lsTLVSid),
+		}
+		tlvs = append(tlvs, lsTLV)
+	case bgp.LS_TLV_PEER_SET_SID:
+		lsTLV := &bgp.LsTLVPeerSetSID{
+			LsTLV: bgp.LsTLV{
+				Type:   sidtype,
+				Length: uint16(lsTlvLen),
+			},
+			Flags:  peerNodeFlag,
+			Weight: uint8(lsTLVWeight),
+			SID:    uint32(lsTLVSid),
+		}
+		tlvs = append(tlvs, lsTLV)
+	}
+
+	pathAttributeLs := &bgp.PathAttributeLs{
+		PathAttribute: bgp.PathAttribute{
+			Flags:  bgp.PathAttrFlags[t],
+			Type:   t,
+			Length: length,
+		},
+		TLVs: tlvs,
+	}
+	len := len(ldTLV)
+	var sum int
+	for i := range len {
+		sum += ldTLV[i].Len()
+	}
+
+	const CodeLen = 1
+	const topologyLen = 8
+	LsNLRIhdrlen := sum + lndTLV.Len() + rndTLV.Len() + topologyLen + CodeLen
+	lsNlri := bgp.LsNLRI{
+		NLRIType:   bgp.LS_NLRI_TYPE_NODE,
+		Length:     uint16(LsNLRIhdrlen),
+		ProtocolID: 7,
+		Identifier: identifier,
+	}
+	nlri := &bgp.LsAddrPrefix{
+		Type:   bgp.LS_NLRI_TYPE_NODE,
+		Length: 4,
+		NLRI: &bgp.LsLinkNLRI{
+			LsNLRI:         lsNlri,
+			LocalNodeDesc:  &lndTLV,
+			RemoteNodeDesc: &rndTLV,
+			LinkDesc:       ldTLV,
+		},
+	}
+	return nlri, pathAttributeLs, nil
+}
+
+func parseLsSRv6SIDNLRIType(args []string) (bgp.AddrPrefixInterface, *bgp.PathAttributeLs, error) {
+	// Format:
+	// gobgp global rib add -a ls srv6sid bgp identifier <identifier> local-asn <local-asn> local-bgp-ls-id <local-bgp-ls-id> local-bgp-router-id <local-bgp-router-id> [local-bgp-confederation-member <confederation-member>] sids <sids>... [multi-topology-id <multi-topology-id>...]
+	req := 11
+	if len(args) < req {
+		return nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
+	}
+
+	m, err := extractReserved(args, map[string]int{
+		"identifier":                     paramSingle,
+		"local-asn":                      paramSingle,
+		"local-bgp-ls-id":                paramSingle,
+		"local-bgp-router-id":            paramSingle,
+		"local-bgp-confederation-member": paramSingle,
+		"sids":                           paramList,
+		"multi-topology-id":              paramList,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	identifier, err := strconv.ParseUint(m["identifier"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	localAsn, err := strconv.ParseUint(m["local-asn"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	localBgpLsId, err := strconv.ParseUint(m["local-bgp-ls-id"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	localBgpConfederationMember, err := strconv.ParseUint(m["local-bgp-confederation-member"][0], 10, 64)
+	if err != nil {
+		return nil, nil, err
+	}
+	lnd := &bgp.LsNodeDescriptor{
+		Asn:                    uint32(localAsn),
+		BGPLsID:                uint32(localBgpLsId),
+		OspfAreaID:             0,
+		PseudoNode:             false,
+		IGPRouterID:            "",
+		BGPRouterID:            net.ParseIP(m["local-bgp-router-id"][0]).To4(),
+		BGPConfederationMember: uint32(localBgpConfederationMember),
+	}
+	lndTLV := bgp.NewLsTLVNodeDescriptor(lnd, bgp.LS_TLV_LOCAL_NODE_DESC)
+
+	sids, ssiLen := apiutil.StringToNetIPLsTLVSrv6SIDInfo(m["sids"])
+	ssi := &bgp.LsTLVSrv6SIDInfo{
+		LsTLV: bgp.LsTLV{
+			Type:   bgp.LS_TLV_SRV6_SID_INFO,
+			Length: ssiLen,
+		},
+		SIDs: sids,
+	}
+
+	// Parse multi-topology-id values from the reserved parameters.
+	var multiTopoIDs []uint16
+	if ids, ok := m["multi-topology-id"]; ok && len(ids) > 0 {
+		for _, idStr := range ids {
+			id, err := strconv.ParseUint(idStr, 10, 16)
+			if err != nil {
+				return nil, nil, err
+			}
+			multiTopoIDs = append(multiTopoIDs, uint16(id))
+		}
+	}
+	mti := &bgp.LsTLVMultiTopoID{
+		LsTLV: bgp.LsTLV{
+			Type:   bgp.LS_TLV_MULTI_TOPO_ID,
+			Length: uint16(2 * len(multiTopoIDs)),
+		},
+		MultiTopoIDs: multiTopoIDs,
+	}
+
+	const CodeLen = 1
+	const topologyLen = 8
+	LsNLRIhdrlen := lndTLV.Len() + mti.Len() + ssi.Len() + topologyLen + CodeLen
+	lsNlri := bgp.LsNLRI{
+		NLRIType:   bgp.LS_NLRI_TYPE_SRV6_SID,
+		Length:     uint16(LsNLRIhdrlen),
+		ProtocolID: 7,
+		Identifier: identifier,
+	}
+	nlri := &bgp.LsAddrPrefix{
+		Type:   bgp.LS_NLRI_TYPE_SRV6_SID,
+		Length: 4,
+		NLRI: &bgp.LsSrv6SIDNLRI{
+			LsNLRI:        lsNlri,
+			LocalNodeDesc: &lndTLV,
+			MultiTopoID:   mti,
+			Srv6SIDInfo:   ssi,
+		},
+	}
+	return nlri, nil, nil
+}
+
+func lsTLVTypeSelect(s string) bgp.LsTLVType {
+	switch s {
+	case "node":
+		return bgp.LS_TLV_PEER_NODE_SID
+	case "adj":
+		return bgp.LS_TLV_ADJACENCY_SID
+	case "set":
+		return bgp.LS_TLV_PEER_SET_SID
+	}
+
+	return bgp.LS_TLV_UNKNOWN
+}
+
+func parseLsArgs(args []string) (bgp.AddrPrefixInterface, *bgp.PathAttributeLs, error) {
+	if len(args) < 1 {
+		return nil, nil, fmt.Errorf("lack of nlriType")
+	}
+	nlriType := args[0]
+	switch nlriType {
+	case "link":
+		return parseLsLinkNLRIType(args)
+		// TODO: case IPv4 Topology Prefix / IPv6 Topology Prefix / TE Policy
+	case "srv6sid":
+		return parseLsSRv6SIDNLRIType(args)
+	}
+
+	return nil, nil, fmt.Errorf("invalid nlriType. expect [link] but %s", nlriType)
+}
+
+func parseRtcArgs(args []string) (bgp.AddrPrefixInterface, error) {
+	// Format:
+	// asn <asn> rt <rt> | default
+	m, err := extractReserved(args, map[string]int{
+		"asn":     paramSingle,
+		"rt":      paramSingle,
+		"default": paramFlag,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if _, ok := m["default"]; ok {
+		return bgp.NewRouteTargetMembershipNLRI(0, nil), nil
+	}
+
+	for _, f := range []string{"asn", "rt"} {
+		if len(m[f]) == 0 {
+			return nil, fmt.Errorf("specify %s", f)
+		}
+	}
+
+	asn, err := toAs4Value(m["asn"][0])
+	if err != nil {
+		return nil, err
+	}
+
+	rt, err := bgp.ParseRouteTarget(m["rt"][0])
+	if err != nil {
+		return nil, err
+	}
+
+	return bgp.NewRouteTargetMembershipNLRI(asn, rt), nil
+}
+
 func extractOrigin(args []string) ([]string, bgp.PathAttributeInterface, error) {
 	typ := bgp.BGP_ORIGIN_ATTR_TYPE_INCOMPLETE
 	for idx, arg := range args {
-		if arg == "origin" && len(args) > (idx+1) {
+		if arg == "origin" && len(args) > idx+1 {
 			switch args[idx+1] {
 			case "igp":
 				typ = bgp.BGP_ORIGIN_ATTR_TYPE_IGP
@@ -925,7 +1816,7 @@ func extractOrigin(args []string) ([]string, bgp.PathAttributeInterface, error) 
 			break
 		}
 	}
-	return args, bgp.NewPathAttributeOrigin(uint8(typ)), nil
+	return args, bgp.NewPathAttributeOrigin(typ), nil
 }
 
 func toAs4Value(s string) (uint32, error) {
@@ -971,7 +1862,7 @@ func newAsPath(aspath string) (bgp.PathAttributeInterface, error) {
 			if asn, err := toAs4Value(n); err != nil {
 				return nil, err
 			} else {
-				asNums = append(asNums, uint32(asn))
+				asNums = append(asNums, asn)
 			}
 		}
 		// Assumes "idx" is even, the given "segment" is of type AS_SEQUENCE,
@@ -988,7 +1879,7 @@ func newAsPath(aspath string) (bgp.PathAttributeInterface, error) {
 
 func extractAsPath(args []string) ([]string, bgp.PathAttributeInterface, error) {
 	for idx, arg := range args {
-		if arg == "aspath" && len(args) > (idx+1) {
+		if arg == "aspath" && len(args) > idx+1 {
 			attr, err := newAsPath(args[idx+1])
 			if err != nil {
 				return nil, nil, err
@@ -1000,14 +1891,13 @@ func extractAsPath(args []string) ([]string, bgp.PathAttributeInterface, error) 
 	return args, nil, nil
 }
 
-func extractNexthop(rf bgp.RouteFamily, args []string) ([]string, string, error) {
-	afi, _ := bgp.RouteFamilyToAfiSafi(rf)
+func extractNexthop(rf bgp.Family, args []string) ([]string, string, error) {
 	nexthop := "0.0.0.0"
-	if afi == bgp.AFI_IP6 {
+	if rf.Afi() == bgp.AFI_IP6 {
 		nexthop = "::"
 	}
 	for idx, arg := range args {
-		if arg == "nexthop" && len(args) > (idx+1) {
+		if arg == "nexthop" && len(args) > idx+1 {
 			if net.ParseIP(args[idx+1]) == nil {
 				return nil, "", fmt.Errorf("invalid nexthop address")
 			}
@@ -1021,7 +1911,7 @@ func extractNexthop(rf bgp.RouteFamily, args []string) ([]string, string, error)
 
 func extractLocalPref(args []string) ([]string, bgp.PathAttributeInterface, error) {
 	for idx, arg := range args {
-		if arg == "local-pref" && len(args) > (idx+1) {
+		if arg == "local-pref" && len(args) > idx+1 {
 			metric, err := strconv.ParseUint(args[idx+1], 10, 32)
 			if err != nil {
 				return nil, nil, err
@@ -1035,7 +1925,7 @@ func extractLocalPref(args []string) ([]string, bgp.PathAttributeInterface, erro
 
 func extractMed(args []string) ([]string, bgp.PathAttributeInterface, error) {
 	for idx, arg := range args {
-		if arg == "med" && len(args) > (idx+1) {
+		if arg == "med" && len(args) > idx+1 {
 			med, err := strconv.ParseUint(args[idx+1], 10, 32)
 			if err != nil {
 				return nil, nil, err
@@ -1049,7 +1939,7 @@ func extractMed(args []string) ([]string, bgp.PathAttributeInterface, error) {
 
 func extractCommunity(args []string) ([]string, bgp.PathAttributeInterface, error) {
 	for idx, arg := range args {
-		if arg == "community" && len(args) > (idx+1) {
+		if arg == "community" && len(args) > idx+1 {
 			elems := strings.Split(args[idx+1], ",")
 			comms := make([]uint32, 0, 1)
 			for _, elem := range elems {
@@ -1068,7 +1958,7 @@ func extractCommunity(args []string) ([]string, bgp.PathAttributeInterface, erro
 
 func extractLargeCommunity(args []string) ([]string, bgp.PathAttributeInterface, error) {
 	for idx, arg := range args {
-		if arg == "large-community" && len(args) > (idx+1) {
+		if arg == "large-community" && len(args) > idx+1 {
 			elems := strings.Split(args[idx+1], ",")
 			comms := make([]*bgp.LargeCommunity, 0, 1)
 			for _, elem := range elems {
@@ -1104,7 +1994,7 @@ func extractPmsiTunnel(args []string) ([]string, bgp.PathAttributeInterface, err
 func extractAigp(args []string) ([]string, bgp.PathAttributeInterface, error) {
 	for idx, arg := range args {
 		if arg == "aigp" {
-			if len(args) < (idx + 3) {
+			if len(args) < idx+3 {
 				return nil, nil, fmt.Errorf("invalid aigp format")
 			}
 			typ := args[idx+1]
@@ -1114,7 +2004,7 @@ func extractAigp(args []string) ([]string, bgp.PathAttributeInterface, error) {
 				if err != nil {
 					return nil, nil, err
 				}
-				aigp := bgp.NewPathAttributeAigp([]bgp.AigpTLVInterface{bgp.NewAigpTLVIgpMetric(uint64(metric))})
+				aigp := bgp.NewPathAttributeAigp([]bgp.AigpTLVInterface{bgp.NewAigpTLVIgpMetric(metric)})
 				return append(args[:idx], args[idx+3:]...), aigp, nil
 			default:
 				return nil, nil, fmt.Errorf("unknown aigp type: %s", typ)
@@ -1127,7 +2017,7 @@ func extractAigp(args []string) ([]string, bgp.PathAttributeInterface, error) {
 func extractAggregator(args []string) ([]string, bgp.PathAttributeInterface, error) {
 	for idx, arg := range args {
 		if arg == "aggregator" {
-			if len(args) < (idx + 1) {
+			if len(args) < idx+1 {
 				return nil, nil, fmt.Errorf("invalid aggregator format")
 			}
 			v := strings.SplitN(args[idx+1], ":", 2)
@@ -1145,9 +2035,11 @@ func extractAggregator(args []string) ([]string, bgp.PathAttributeInterface, err
 	return args, nil, nil
 }
 
-func parsePath(rf bgp.RouteFamily, args []string) (*api.Path, error) {
+func parsePath(rf bgp.Family, args []string) (*api.Path, error) {
 	var nlri bgp.AddrPrefixInterface
 	var extcomms []string
+	var psid *bgp.PathAttributePrefixSID
+	var ls *bgp.PathAttributeLs
 	var err error
 	attrs := make([]bgp.PathAttributeInterface, 0, 1)
 
@@ -1233,8 +2125,6 @@ func parsePath(rf bgp.RouteFamily, args []string) (*api.Path, error) {
 			return nil, err
 		}
 
-		extcomms = args[5:]
-
 		if rf == bgp.RF_IPv4_VPN {
 			if ip.To4() == nil {
 				return nil, fmt.Errorf("invalid ipv4 prefix")
@@ -1246,6 +2136,19 @@ func parsePath(rf bgp.RouteFamily, args []string) (*api.Path, error) {
 			}
 			nlri = bgp.NewLabeledVPNIPv6AddrPrefix(uint8(ones), ip.String(), *mpls, rd)
 		}
+
+		args = args[5:]
+
+		if len(args) > 1 && args[0] == "identifier" {
+			id, err := strconv.ParseUint(args[1], 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid format")
+			}
+			nlri.SetPathIdentifier(uint32(id))
+			args = args[2:]
+		}
+
+		extcomms = args
 	case bgp.RF_IPv4_MPLS, bgp.RF_IPv6_MPLS:
 		if len(args) < 2 {
 			return nil, fmt.Errorf("invalid format")
@@ -1278,11 +2181,12 @@ func parsePath(rf bgp.RouteFamily, args []string) (*api.Path, error) {
 	case bgp.RF_EVPN:
 		nlri, extcomms, err = parseEvpnArgs(args)
 	case bgp.RF_FS_IPv4_UC, bgp.RF_FS_IPv4_VPN, bgp.RF_FS_IPv6_UC, bgp.RF_FS_IPv6_VPN, bgp.RF_FS_L2_VPN:
-		nlri, extcomms, err = parseFlowSpecArgs(rf, args)
+		nlri, psid, extcomms, err = parseFlowSpecArgs(rf, args)
 	case bgp.RF_OPAQUE:
 		m, err := extractReserved(args, map[string]int{
 			"key":   paramSingle,
-			"value": paramSingle})
+			"value": paramSingle,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -1294,11 +2198,22 @@ func parsePath(rf bgp.RouteFamily, args []string) (*api.Path, error) {
 		} else {
 			nlri = bgp.NewOpaqueNLRI([]byte(m["key"][0]), nil)
 		}
+	case bgp.RF_MUP_IPv4:
+		nlri, psid, extcomms, err = parseMUPArgs(args, bgp.AFI_IP, nexthop)
+	case bgp.RF_MUP_IPv6:
+		nlri, psid, extcomms, err = parseMUPArgs(args, bgp.AFI_IP6, nexthop)
+	case bgp.RF_LS:
+		nlri, ls, err = parseLsArgs(args)
+	case bgp.RF_RTC_UC:
+		nlri, err = parseRtcArgs(args)
 	default:
 		return nil, fmt.Errorf("unsupported route family: %s", rf)
 	}
 	if err != nil {
 		return nil, err
+	}
+	if ls != nil {
+		attrs = append(attrs, ls)
 	}
 
 	if rf == bgp.RF_IPv4_UC && net.ParseIP(nexthop).To4() != nil {
@@ -1306,6 +2221,10 @@ func parsePath(rf bgp.RouteFamily, args []string) (*api.Path, error) {
 	} else {
 		mpreach := bgp.NewPathAttributeMpReachNLRI(nexthop, []bgp.AddrPrefixInterface{nlri})
 		attrs = append(attrs, mpreach)
+	}
+
+	if psid != nil {
+		attrs = append(attrs, psid)
 	}
 
 	if extcomms != nil {
@@ -1334,7 +2253,7 @@ func parsePath(rf bgp.RouteFamily, args []string) (*api.Path, error) {
 	}
 	sort.Slice(attrs, func(i, j int) bool { return attrs[i].GetType() < attrs[j].GetType() })
 
-	return apiutil.NewPath(nlri, false, attrs, time.Now()), nil
+	return apiutil.NewPath(nlri, false, attrs, time.Now())
 }
 
 func showGlobalRib(args []string) error {
@@ -1346,7 +2265,7 @@ func modPath(resource string, name, modtype string, args []string) error {
 	if err != nil {
 		return err
 	}
-	rf := apiutil.ToRouteFamily(f)
+	rf := apiutil.ToFamily(f)
 	path, err := parsePath(rf, args)
 	if err != nil {
 		cmdstr := "global"
@@ -1374,13 +2293,13 @@ func modPath(resource string, name, modtype string, args []string) error {
 		sort.SliceStable(ss, func(i, j int) bool { return ss[i] < ss[j] })
 		ss = append(ss, "<DEC_NUM>")
 		etherTypes := strings.Join(ss, ", ")
-		helpErrMap := map[bgp.RouteFamily]error{}
+		helpErrMap := map[bgp.Family]error{}
 		baseHelpMsgFmt := fmt.Sprintf(`error: %s
 usage: %s rib -a %%s %s <PREFIX> %%s [origin { igp | egp | incomplete }] [aspath <ASPATH>] [nexthop <ADDRESS>] [med <NUM>] [local-pref <NUM>] [community <COMMUNITY>] [aigp metric <NUM>] [large-community <LARGE_COMMUNITY>] [aggregator <AGGREGATOR>]
-	<ASPATH>: <AS>[,<AS>],
-	<COMMUNITY>: xxx:xxx|internet|planned-shut|accept-own|route-filter-translated-v4|route-filter-v4|route-filter-translated-v6|route-filter-v6|llgr-stale|no-llgr|blackhole|no-export|no-advertise|no-export-subconfed|no-peer,
-	<LARGE_COMMUNITY>: xxx:xxx:xxx[,<LARGE_COMMUNITY>],
-	<AGGREGATOR>: <AS>:<ADDRESS>`,
+    <ASPATH>: <AS>[,<AS>],
+    <COMMUNITY>: xxx:xxx|internet|planned-shut|accept-own|route-filter-translated-v4|route-filter-v4|route-filter-translated-v6|route-filter-v6|llgr-stale|no-llgr|blackhole|no-export|no-advertise|no-export-subconfed|no-peer,
+    <LARGE_COMMUNITY>: xxx:xxx:xxx[,<LARGE_COMMUNITY>],
+    <AGGREGATOR>: <AS>:<ADDRESS>`,
 			err,
 			cmdstr,
 			// <address family>
@@ -1399,7 +2318,7 @@ usage: %s rib -a %%s %s%%s match <MATCH> then <THEN>%%s%%s%%s
     <THEN> : { %s |
                %s |
                %s <RATE> [as <AS>] |
-               %s <RT> |
+               %s <RT> [color <color>] [prefix <prefix>] [locator-node-length <length>] [function-length <length>] [behavior <behavior>] |
                %s <DEC_NUM> |
                %s { sample | terminal | sample-terminal } }...
     <RT> : xxx:yyy, xxx.xxx.xxx.xxx:yyy, xxxx::xxxx:yyy, xxx.xxx:yyy`,
@@ -1503,21 +2422,54 @@ usage: %s rib %s { a-d <A-D> | macadv <MACADV> | multicast <MULTICAST> | esi <ES
 			cmdstr,
 			modtype,
 		)
+		helpErrMap[bgp.RF_MUP_IPv4] = fmt.Errorf(`error: %s
+usage: %s rib %s { isd <ISD> | dsd <DSD> | t1st <T1ST> | t2st <T2ST> } -a mup-ipv4
+    <ISD>  : <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...]
+    <DSD>  : <ip address> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup <segment identifier>]
+    <T1ST> : <ip prefix> rd <rd> [rt <rt>...] teid <teid> qfi <qfi> endpoint <endpoint> [source <source>]
+    <T2ST> : <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup <segment identifier>]`,
+			err,
+			cmdstr,
+			modtype,
+		)
+		helpErrMap[bgp.RF_MUP_IPv6] = fmt.Errorf(`error: %s
+usage: %s rib %s { isd <ISD> | dsd <DSD> | t1st <T1ST> | t2st <T2ST> } -a mup-ipv6
+    <ISD>  : <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...]
+    <DSD>  : <ip address> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup <segment identifier>]
+    <T1ST> : <ip prefix> rd <rd> [rt <rt>...] teid <teid> qfi <qfi> endpoint <endpoint> [source <source>]
+    <T2ST> : <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup <segment identifier>]`,
+			err,
+			cmdstr,
+			modtype,
+		)
 		helpErrMap[bgp.RF_OPAQUE] = fmt.Errorf(`error: %s
 usage: %s rib %s key <KEY> [value <VALUE>]`,
 			err,
 			cmdstr,
 			modtype,
 		)
+
+		rtcHelpMsgFmt := fmt.Sprintf(`error: %s
+usage: %s rib -a %%s %s %%s [origin { igp | egp | incomplete }] [aspath <ASPATH>] [nexthop <ADDRESS>] [med <NUM>] [local-pref <NUM>] [community <COMMUNITY>] [aigp metric <NUM>] [large-community <LARGE_COMMUNITY>] [aggregator <AGGREGATOR>]
+    <ASPATH>: <AS>[,<AS>],
+    <COMMUNITY>: xxx:xxx|internet|planned-shut|accept-own|route-filter-translated-v4|route-filter-v4|route-filter-translated-v6|route-filter-v6|llgr-stale|no-llgr|blackhole|no-export|no-advertise|no-export-subconfed|no-peer,
+    <LARGE_COMMUNITY>: xxx:xxx:xxx[,<LARGE_COMMUNITY>],
+    <AGGREGATOR>: <AS>:<ADDRESS>`,
+			err,
+			cmdstr,
+			modtype,
+		)
+		helpErrMap[bgp.RF_RTC_UC] = fmt.Errorf(rtcHelpMsgFmt, "rtc", "{ asn <ASN> rt <RT> | default }")
+
 		if err, ok := helpErrMap[rf]; ok {
 			return err
 		}
 		return err
 	}
 
-	r := api.TableType_GLOBAL
+	r := api.TableType_TABLE_TYPE_GLOBAL
 	if resource == cmdVRF {
-		r = api.TableType_VRF
+		r = api.TableType_TABLE_TYPE_VRF
 	}
 
 	if modtype == cmdAdd {
@@ -1547,7 +2499,7 @@ func showGlobalConfig() error {
 		return nil
 	}
 	g := r.Global
-	fmt.Println("AS:       ", g.As)
+	fmt.Println("AS:       ", g.Asn)
 	fmt.Println("Router-ID:", g.RouterId)
 	if len(g.ListenAddresses) > 0 {
 		fmt.Printf("Listening Port: %d, Addresses: %s\n", g.ListenPort, strings.Join(g.ListenAddresses, ", "))
@@ -1564,7 +2516,8 @@ func modGlobalConfig(args []string) error {
 		"router-id":        paramSingle,
 		"listen-port":      paramSingle,
 		"listen-addresses": paramList,
-		"use-multipath":    paramFlag})
+		"use-multipath":    paramFlag,
+	})
 	if err != nil || len(m["as"]) != 1 || len(m["router-id"]) != 1 {
 		return fmt.Errorf("usage: gobgp global as <VALUE> router-id <VALUE> [use-multipath] [listen-port <VALUE>] [listen-addresses <VALUE>...]")
 	}
@@ -1576,11 +2529,11 @@ func modGlobalConfig(args []string) error {
 	if id.To4() == nil {
 		return fmt.Errorf("invalid router-id format")
 	}
-	var port int64
+	var port uint64
 	if len(m["listen-port"]) > 0 {
 		// Note: GlobalConfig.Port is uint32 type, but the TCP/UDP port is
 		// 16-bit length.
-		port, err = strconv.ParseInt(m["listen-port"][0], 10, 16)
+		port, err = strconv.ParseUint(m["listen-port"][0], 10, 16)
 		if err != nil {
 			return err
 		}
@@ -1591,7 +2544,7 @@ func modGlobalConfig(args []string) error {
 	}
 	_, err = client.StartBgp(ctx, &api.StartBgpRequest{
 		Global: &api.Global{
-			As:               uint32(asn),
+			Asn:              uint32(asn),
 			RouterId:         id.String(),
 			ListenPort:       int32(port),
 			ListenAddresses:  m["listen-addresses"],
@@ -1627,6 +2580,7 @@ func newGlobalCmd() *cobra.Command {
 	}
 
 	ribCmd.PersistentFlags().StringVarP(&subOpts.AddressFamily, "address-family", "a", "", "address family")
+	ribCmd.PersistentFlags().Uint64VarP(&subOpts.BatchSize, "batch-size", "b", 0, "Size of the temporary buffer in the server memory. Zero is unlimited (default)")
 
 	for _, v := range []string{cmdAdd, cmdDel} {
 		cmd := &cobra.Command{
@@ -1649,7 +2603,7 @@ func newGlobalCmd() *cobra.Command {
 						exitWithError(err)
 					}
 					if _, err = client.DeletePath(ctx, &api.DeletePathRequest{
-						TableType: api.TableType_GLOBAL,
+						TableType: api.TableType_TABLE_TYPE_GLOBAL,
 						Family:    family,
 					}); err != nil {
 						exitWithError(err)

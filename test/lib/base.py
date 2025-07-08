@@ -15,10 +15,9 @@
 
 
 import os
+import subprocess
 import time
 import itertools
-
-from invoke import run
 
 import textwrap
 from colored import fg, attr
@@ -88,7 +87,7 @@ TEST_NETWORK_LABEL = TEST_CONTAINER_LABEL
 def local(s, capture=False):
     print('[localhost] local:', s)
     _env = {'NOSE_NOLOGCAPTURE': '1' if capture else '0'}
-    return run(s, hide=True, env=_env).stdout.strip()
+    return subprocess.check_output(s, shell=True, env=_env).decode('utf-8').strip()
 
 
 def yellow(s):
@@ -128,15 +127,14 @@ def wait_for_completion(f, timeout=120):
 
 
 def try_several_times(f, t=3, s=1):
-    e = Exception
     for _ in range(t):
         try:
             r = f()
-        except RuntimeError as e:
+        except RuntimeError:
             time.sleep(s)
         else:
             return r
-    raise e
+    raise Exception
 
 
 def assert_several_times(f, t=30, s=1):
@@ -144,8 +142,9 @@ def assert_several_times(f, t=30, s=1):
     for _ in range(t):
         try:
             f()
-        except AssertionError as e:
+        except AssertionError as ae:
             time.sleep(s)
+            e = ae
         else:
             return
     raise e
@@ -361,14 +360,35 @@ class BGPContainer(Container):
             raise Exception('peer not exists')
         self.add_peer(peer, **kwargs)
 
-    def add_peer(self, peer, passwd=None, vpn=False, is_rs_client=False,
-                 policies=None, passive=False,
-                 is_rr_client=False, cluster_id=None,
-                 flowspec=False, bridge='', reload_config=True, as2=False,
-                 graceful_restart=None, local_as=None, prefix_limit=None,
-                 v6=False, llgr=None, vrf='', interface='', allow_as_in=0,
-                 remove_private_as=None, replace_peer_as=False, addpath=False,
-                 treat_as_withdraw=False, remote_as=None):
+    def add_peer(
+        self,
+        peer,
+        passwd=None,
+        vpn=False,
+        is_rs_client=False,
+        policies=None,
+        passive=False,
+        is_rr_client=False,
+        cluster_id=None,
+        flowspec=False,
+        bridge="",
+        reload_config=True,
+        as2=False,
+        graceful_restart=None,
+        local_as=None,
+        prefix_limit=None,
+        v6=False,
+        llgr=None,
+        vrf="",
+        interface="",
+        allow_as_in=0,
+        remove_private_as=None,
+        replace_peer_as=False,
+        addpath=0,
+        treat_as_withdraw=False,
+        remote_as=None,
+        mup=False,
+    ):
         neigh_addr = ''
         local_addr = ''
         it = itertools.product(self.ip_addrs, peer.ip_addrs)
@@ -415,7 +435,8 @@ class BGPContainer(Container):
                             'replace_peer_as': replace_peer_as,
                             'addpath': addpath,
                             'treat_as_withdraw': treat_as_withdraw,
-                            'remote_as': remote_as or peer.asn}
+                            'remote_as': remote_as or peer.asn,
+                            'mup': mup}
         if self.is_running and reload_config:
             self.create_config()
             self.reload_config()
@@ -566,6 +587,18 @@ class BGPContainer(Container):
     def reload_config(self):
         raise Exception('implement reload_config() method')
 
+    def show_addr(self):
+        cmd = '/sbin/ip addr'
+        res = self.local(cmd, capture=True)
+        print(yellow(res))
+
+    def show_route(self, ipv6=False):
+        if ipv6:
+            cmd = '/sbin/ip -6 route'
+        else:
+            cmd = '/sbin/ip route'
+        res = self.local(cmd, capture=True)
+        print(yellow(res))
 
 class OSPFContainer(Container):
     WAIT_FOR_BOOT = 1

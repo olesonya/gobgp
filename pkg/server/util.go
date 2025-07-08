@@ -16,13 +16,9 @@
 package server
 
 import (
-	"net"
-	"strings"
-	"syscall"
-
 	"github.com/eapache/channels"
 
-	"github.com/osrg/gobgp/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
 
 func cleanInfiniteChannel(ch *channels.InfiniteChannel) {
@@ -55,54 +51,9 @@ func decodeAdministrativeCommunication(data []byte) (string, []byte) {
 	if len(data) == 0 {
 		return "", data
 	}
-	communicationLen := int(data[0])
-	if communicationLen > bgp.BGP_ERROR_ADMINISTRATIVE_COMMUNICATION_MAX {
-		communicationLen = bgp.BGP_ERROR_ADMINISTRATIVE_COMMUNICATION_MAX
-	}
+	communicationLen := min(int(data[0]), bgp.BGP_ERROR_ADMINISTRATIVE_COMMUNICATION_MAX)
 	if communicationLen > len(data)-1 {
 		communicationLen = len(data) - 1
 	}
 	return string(data[1 : communicationLen+1]), data[communicationLen+1:]
-}
-
-func extractFamilyFromTCPConn(conn *net.TCPConn) int {
-	family := syscall.AF_INET
-	if strings.Contains(conn.RemoteAddr().String(), "[") {
-		family = syscall.AF_INET6
-	}
-	return family
-}
-
-func setsockOptString(sc syscall.RawConn, level int, opt int, str string) error {
-	var opterr error
-	fn := func(s uintptr) {
-		opterr = syscall.SetsockoptString(int(s), level, opt, str)
-	}
-	err := sc.Control(fn)
-	if opterr == nil {
-		return err
-	}
-	return opterr
-}
-
-func setsockOptInt(sc syscall.RawConn, level, name, value int) error {
-	var opterr error
-	fn := func(s uintptr) {
-		opterr = syscall.SetsockoptInt(int(s), level, name, value)
-	}
-	err := sc.Control(fn)
-	if opterr == nil {
-		return err
-	}
-	return opterr
-}
-
-func setsockoptIpTtl(sc syscall.RawConn, family int, value int) error {
-	level := syscall.IPPROTO_IP
-	name := syscall.IP_TTL
-	if family == syscall.AF_INET6 {
-		level = syscall.IPPROTO_IPV6
-		name = syscall.IPV6_UNICAST_HOPS
-	}
-	return setsockOptInt(sc, level, name, value)
 }

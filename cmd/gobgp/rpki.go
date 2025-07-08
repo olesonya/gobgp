@@ -21,9 +21,9 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/golang/protobuf/ptypes"
-	api "github.com/osrg/gobgp/api"
 	"github.com/spf13/cobra"
+
+	"github.com/osrg/gobgp/v4/api"
 )
 
 func showRPKIServer(args []string) error {
@@ -50,8 +50,7 @@ func showRPKIServer(args []string) error {
 			uptime := "never"
 			if r.State.Up {
 				s = "Up"
-				t, _ := ptypes.Timestamp(r.State.Uptime)
-				uptime = fmt.Sprint(formatTimedelta(t))
+				uptime = fmt.Sprint(formatTimedelta(r.State.Uptime.AsTime()))
 			}
 
 			fmt.Printf(format, net.JoinHostPort(r.Conf.Address, fmt.Sprintf("%d", r.Conf.RemotePort)), s, uptime, fmt.Sprintf("%d/%d", r.State.RecordIpv4, r.State.RecordIpv6))
@@ -126,7 +125,7 @@ func showRPKITable(args []string) error {
 			IP:   net.ParseIP(r.GetPrefix()),
 			Mask: net.CIDRMask(int(r.GetPrefixlen()), bits),
 		}
-		fmt.Printf(format, n.String(), fmt.Sprint(r.Maxlen), fmt.Sprint(r.As), net.JoinHostPort(r.Conf.Address, strconv.Itoa(int(r.Conf.RemotePort))))
+		fmt.Printf(format, n.String(), fmt.Sprint(r.Maxlen), fmt.Sprint(r.Asn), net.JoinHostPort(r.Conf.Address, strconv.Itoa(int(r.Conf.RemotePort))))
 	}
 	return nil
 }
@@ -140,8 +139,10 @@ func newRPKICmd() *cobra.Command {
 		Use: cmdRPKIServer,
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(args) == 0 || len(args) == 1 {
-				showRPKIServer(args)
-				return
+				err := showRPKIServer(args)
+				if err != nil {
+					exitWithError(err)
+				}
 			} else if len(args) != 2 {
 				exitWithError(fmt.Errorf("usage: gobgp rpki server <ip address> [reset|softreset|enable]"))
 			}
@@ -188,8 +189,8 @@ func newRPKICmd() *cobra.Command {
 
 	tableCmd := &cobra.Command{
 		Use: cmdRPKITable,
-		Run: func(cmd *cobra.Command, args []string) {
-			showRPKITable(args)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return showRPKITable(args)
 		},
 	}
 	tableCmd.PersistentFlags().StringVarP(&subOpts.AddressFamily, "address-family", "a", "", "address family")

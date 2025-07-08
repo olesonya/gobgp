@@ -5,55 +5,54 @@ import (
 	"fmt"
 
 	"github.com/BurntSushi/toml"
-	"github.com/osrg/gobgp/internal/pkg/config"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 )
 
 func main() {
-	b := config.Bgp{
-		Global: config.Global{
-			Config: config.GlobalConfig{
+	b := oc.Bgp{
+		Global: oc.Global{
+			Config: oc.GlobalConfig{
 				As:       12332,
 				RouterId: "10.0.0.1",
 			},
 		},
-		Neighbors: []config.Neighbor{
-			config.Neighbor{
-				Config: config.NeighborConfig{
+		Neighbors: []oc.Neighbor{
+			{
+				Config: oc.NeighborConfig{
 					PeerAs:          12333,
 					AuthPassword:    "apple",
 					NeighborAddress: "192.168.177.33",
 				},
-				AfiSafis: []config.AfiSafi{
-					config.AfiSafi{
-						Config: config.AfiSafiConfig{
+				AfiSafis: []oc.AfiSafi{
+					{
+						Config: oc.AfiSafiConfig{
 							AfiSafiName: "ipv4-unicast",
 						},
 					},
-					config.AfiSafi{
-						Config: config.AfiSafiConfig{
+					{
+						Config: oc.AfiSafiConfig{
 							AfiSafiName: "ipv6-unicast",
 						},
 					},
 				},
-				ApplyPolicy: config.ApplyPolicy{
-
-					Config: config.ApplyPolicyConfig{
+				ApplyPolicy: oc.ApplyPolicy{
+					Config: oc.ApplyPolicyConfig{
 						ImportPolicyList:    []string{"pd1"},
-						DefaultImportPolicy: config.DEFAULT_POLICY_TYPE_ACCEPT_ROUTE,
+						DefaultImportPolicy: oc.DEFAULT_POLICY_TYPE_ACCEPT_ROUTE,
 					},
 				},
 			},
 
-			config.Neighbor{
-				Config: config.NeighborConfig{
+			{
+				Config: oc.NeighborConfig{
 					PeerAs:          12334,
 					AuthPassword:    "orange",
 					NeighborAddress: "192.168.177.32",
 				},
 			},
 
-			config.Neighbor{
-				Config: config.NeighborConfig{
+			{
+				Config: oc.NeighborConfig{
 					PeerAs:          12335,
 					AuthPassword:    "grape",
 					NeighborAddress: "192.168.177.34",
@@ -76,91 +75,90 @@ func main() {
 	fmt.Printf("%v\n", buffer.String())
 }
 
-func policy() config.RoutingPolicy {
-
-	ps := config.PrefixSet{
+func policy() oc.RoutingPolicy {
+	ps := oc.PrefixSet{
 		PrefixSetName: "ps1",
-		PrefixList: []config.Prefix{
-			config.Prefix{
+		PrefixList: []oc.Prefix{
+			{
 				IpPrefix:        "10.3.192.0/21",
 				MasklengthRange: "21..24",
-			}},
+			},
+		},
 	}
 
-	ns := config.NeighborSet{
+	ns := oc.NeighborSet{
 		NeighborSetName:  "ns1",
 		NeighborInfoList: []string{"10.0.0.2"},
 	}
 
-	cs := config.CommunitySet{
+	cs := oc.CommunitySet{
 		CommunitySetName: "community1",
 		CommunityList:    []string{"65100:10"},
 	}
 
-	ecs := config.ExtCommunitySet{
+	ecs := oc.ExtCommunitySet{
 		ExtCommunitySetName: "ecommunity1",
 		ExtCommunityList:    []string{"RT:65001:200"},
 	}
 
-	as := config.AsPathSet{
+	as := oc.AsPathSet{
 		AsPathSetName: "aspath1",
 		AsPathList:    []string{"^65100"},
 	}
 
-	bds := config.BgpDefinedSets{
-		CommunitySets:    []config.CommunitySet{cs},
-		ExtCommunitySets: []config.ExtCommunitySet{ecs},
-		AsPathSets:       []config.AsPathSet{as},
+	bds := oc.BgpDefinedSets{
+		CommunitySets:    []oc.CommunitySet{cs},
+		ExtCommunitySets: []oc.ExtCommunitySet{ecs},
+		AsPathSets:       []oc.AsPathSet{as},
 	}
 
-	ds := config.DefinedSets{
-		PrefixSets:     []config.PrefixSet{ps},
-		NeighborSets:   []config.NeighborSet{ns},
+	ds := oc.DefinedSets{
+		PrefixSets:     []oc.PrefixSet{ps},
+		NeighborSets:   []oc.NeighborSet{ns},
 		BgpDefinedSets: bds,
 	}
 
-	al := config.AsPathLength{
+	al := oc.AsPathLength{
 		Operator: "eq",
 		Value:    2,
 	}
 
-	s := config.Statement{
+	s := oc.Statement{
 		Name: "statement1",
-		Conditions: config.Conditions{
-
-			MatchPrefixSet: config.MatchPrefixSet{
+		Conditions: oc.Conditions{
+			MatchPrefixSet: oc.MatchPrefixSet{
 				PrefixSet:       "ps1",
-				MatchSetOptions: config.MATCH_SET_OPTIONS_RESTRICTED_TYPE_ANY,
+				MatchSetOptions: oc.MATCH_SET_OPTIONS_RESTRICTED_TYPE_ANY,
 			},
 
-			MatchNeighborSet: config.MatchNeighborSet{
+			MatchNeighborSet: oc.MatchNeighborSet{
 				NeighborSet:     "ns1",
-				MatchSetOptions: config.MATCH_SET_OPTIONS_RESTRICTED_TYPE_ANY,
+				MatchSetOptions: oc.MATCH_SET_OPTIONS_RESTRICTED_TYPE_ANY,
 			},
 
-			BgpConditions: config.BgpConditions{
-				MatchCommunitySet: config.MatchCommunitySet{
+			BgpConditions: oc.BgpConditions{
+				MatchCommunitySet: oc.MatchCommunitySet{
 					CommunitySet:    "community1",
-					MatchSetOptions: config.MATCH_SET_OPTIONS_TYPE_ANY,
+					MatchSetOptions: oc.MATCH_SET_OPTIONS_TYPE_ANY,
 				},
 
-				MatchExtCommunitySet: config.MatchExtCommunitySet{
+				MatchExtCommunitySet: oc.MatchExtCommunitySet{
 					ExtCommunitySet: "ecommunity1",
-					MatchSetOptions: config.MATCH_SET_OPTIONS_TYPE_ANY,
+					MatchSetOptions: oc.MATCH_SET_OPTIONS_TYPE_ANY,
 				},
 
-				MatchAsPathSet: config.MatchAsPathSet{
+				MatchAsPathSet: oc.MatchAsPathSet{
 					AsPathSet:       "aspath1",
-					MatchSetOptions: config.MATCH_SET_OPTIONS_TYPE_ANY,
+					MatchSetOptions: oc.MATCH_SET_OPTIONS_TYPE_ANY,
 				},
 				AsPathLength: al,
 			},
 		},
-		Actions: config.Actions{
+		Actions: oc.Actions{
 			RouteDisposition: "reject-route",
-			BgpActions: config.BgpActions{
-				SetCommunity: config.SetCommunity{
-					SetCommunityMethod: config.SetCommunityMethod{
+			BgpActions: oc.BgpActions{
+				SetCommunity: oc.SetCommunity{
+					SetCommunityMethod: oc.SetCommunityMethod{
 						CommunitiesList: []string{"65100:20"},
 					},
 					Options: "ADD",
@@ -170,14 +168,14 @@ func policy() config.RoutingPolicy {
 		},
 	}
 
-	pd := config.PolicyDefinition{
+	pd := oc.PolicyDefinition{
 		Name:       "pd1",
-		Statements: []config.Statement{s},
+		Statements: []oc.Statement{s},
 	}
 
-	p := config.RoutingPolicy{
+	p := oc.RoutingPolicy{
 		DefinedSets:       ds,
-		PolicyDefinitions: []config.PolicyDefinition{pd},
+		PolicyDefinitions: []oc.PolicyDefinition{pd},
 	}
 
 	return p

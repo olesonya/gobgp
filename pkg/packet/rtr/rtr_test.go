@@ -38,7 +38,6 @@ func verifyRTRMessage(t *testing.T, m1 RTRMessage) {
 }
 
 func randUint32() uint32 {
-	rand.Seed(time.Now().UnixNano())
 	return rand.Uint32()
 }
 
@@ -115,4 +114,24 @@ func Test_RTRErrorReport(t *testing.T) {
 
 	// when it has both "erroneous PDU" and "Arbitrary Text"
 	verifyRTRMessage(t, NewRTRErrorReport(CORRUPT_DATA, errPDU, errText2))
+}
+
+//nolint:errcheck
+func FuzzParseRTR(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		ParseRTR(data)
+	})
+}
+
+// grep -r DecodeFromBytes pkg/packet/rtr/ | grep -e ":func " | perl -pe 's|func \(.* \*(.*?)\).*|(&\1\{\})\.DecodeFromBytes(data)|g' | awk -F ':' '{print $2}'
+//
+//nolint:errcheck
+func FuzzDecodeFromBytes(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		(&RTRCommon{}).DecodeFromBytes(data)
+		(&RTRReset{}).DecodeFromBytes(data)
+		(&RTRCacheResponse{}).DecodeFromBytes(data)
+		(&RTRIPPrefix{}).DecodeFromBytes(data)
+		(&RTRErrorReport{}).DecodeFromBytes(data)
+	})
 }

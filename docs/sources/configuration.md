@@ -58,6 +58,7 @@
 [[neighbors]]
     [neighbors.config]
         peer-as = 2
+        # To disable AS checking set to 0
         auth-password = "password"
         neighbor-address = "192.168.10.2"
         # override global.config.as value
@@ -65,20 +66,22 @@
         remove-private-as = "all"
         # To enable peer group setting, uncomment the following
         #peer-group = "my-peer-group"
+        # Force sending Software Version Capability, default: disabled.
+        #send-software-version = true
     [neighbors.as-path-options.config]
         allow-own-as = 1
         replace-peer-as = true
     [neighbors.timers.config]
-        connect-retry = 5
-        hold-time = 9
-        keepalive-interval = 3
+        connect-retry = 5 #unit of measurement is seconds
+        hold-time = 9 #unit of measurement is seconds
+        keepalive-interval = 3 #unit of measurement is seconds
     [neighbors.transport.config]
         passive-mode = true
         local-address = "192.168.10.1"
         remote-port = 2016
         ttl = 64  # default value on Linux
     [neighbors.ebgp-multihop.config]
-        enabled = true
+        enabled = true #directly connection should be set false，if not ，peer will be deleted after hold-time
         multihop-ttl = 100
     [neighbors.route-reflector.config]
         route-reflector-client = true
@@ -128,6 +131,9 @@
         afi-safi-name = "l2vpn-evpn"
     [[neighbors.afi-safis]]
         [neighbors.afi-safis.config]
+        afi-safi-name = "l2vpn-vpls"
+    [[neighbors.afi-safis]]
+        [neighbors.afi-safis.config]
         afi-safi-name = "rtc"
     [[neighbors.afi-safis]]
         [neighbors.afi-safis.config]
@@ -141,6 +147,12 @@
     [[neighbors.afi-safis]]
         [neighbors.afi-safis.config]
         afi-safi-name = "ipv6-flowspec"
+    [[neighbors.afi-safis]]
+        [neighbors.afi-safis.config]
+        afi-safi-name = "ipv4-mup"
+    [[neighbors.afi-safis]]
+        [neighbors.afi-safis.config]
+        afi-safi-name = "ipv6-mup"
     [[neighbors.afi-safis]]
         [neighbors.afi-safis.config]
         afi-safi-name = "opaque"
@@ -160,10 +172,16 @@
     #    enabled = true
     #    ttl-min = 255  # 255 means directly connected
 
+[[neighbors]]
+    [neighbors.config]
+        peer-group = "my-peer-group"
+        neighbor-address = "127.0.0.2"
+
 [[peer-groups]]
   [peer-groups.config]
     peer-group-name = "my-peer-group"
     peer-as = 65000
+    send-software-version = true
   [[peer-groups.afi-safis]]
     [peer-groups.afi-safis.config]
       afi-safi-name = "ipv4-unicast"

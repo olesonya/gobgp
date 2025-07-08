@@ -18,18 +18,25 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 
-	api "github.com/osrg/gobgp/api"
-	"github.com/osrg/gobgp/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
 
 const globalRIBName = "global"
@@ -93,6 +100,7 @@ const (
 
 var subOpts struct {
 	AddressFamily string `short:"a" long:"address-family" description:"specifying an address family"`
+	BatchSize     uint64 `short:"b" long:"batch-size" description:"Size of the temporary buffer in the server memory. Zero is unlimited (default)"`
 }
 
 var neighborsOpts struct {
@@ -109,6 +117,7 @@ var mrtOpts struct {
 	SkipV4      bool   `long:"no-ipv4" description:"Skip importing IPv4 routes"`
 	SkipV6      bool   `long:"no-ipv4" description:"Skip importing IPv6 routes"`
 	NextHop     net.IP `long:"nexthop" description:"Rewrite nexthop"`
+	PeerASN     uint32 `long:"peer-asn" description:"Inject prefixes only from specified AS number"`
 }
 
 var bmpOpts struct {
@@ -141,7 +150,7 @@ func cidr2prefix(cidr string) string {
 		return cidr
 	}
 	var buffer bytes.Buffer
-	for i := 0; i < len(n.IP); i++ {
+	for i := range len(n.IP) {
 		buffer.WriteString(fmt.Sprintf("%08b", n.IP[i]))
 	}
 	ones, _ := n.Mask.Size()
@@ -189,34 +198,127 @@ func extractReserved(args []string, keys map[string]int) (map[string][]string, e
 	return m, nil
 }
 
-func newClient(ctx context.Context) (api.GobgpApiClient, context.CancelFunc, error) {
-	grpcOpts := []grpc.DialOption{grpc.WithBlock()}
+func loadCertificatePEM(filePath string) (*x509.Certificate, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	rest := content
+	var block *pem.Block
+	var cert *x509.Certificate
+	for len(rest) > 0 {
+		block, rest = pem.Decode(content)
+		if block == nil {
+			// no PEM data found, rest will not have been modified
+			break
+		}
+		content = rest
+		switch block.Type {
+		case "CERTIFICATE":
+			cert, err = x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			return cert, err
+		default:
+			// not the PEM block we're looking for
+			continue
+		}
+	}
+	return nil, errors.New("no certificate PEM block found")
+}
+
+func loadKeyPEM(filePath string) (crypto.PrivateKey, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	rest := content
+	var block *pem.Block
+	var key crypto.PrivateKey
+	for len(rest) > 0 {
+		block, rest = pem.Decode(content)
+		if block == nil {
+			// no PEM data found, rest will not have been modified
+			break
+		}
+		switch block.Type {
+		case "RSA PRIVATE KEY":
+			key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			return key, err
+		case "PRIVATE KEY":
+			key, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			return key, err
+		case "EC PRIVATE KEY":
+			key, err = x509.ParseECPrivateKey(block.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			return key, err
+		default:
+			// not the PEM block we're looking for
+			continue
+		}
+	}
+	return nil, errors.New("no private key PEM block found")
+}
+
+func newConn() (*grpc.ClientConn, error) {
+	grpcOpts := []grpc.DialOption{}
 	if globalOpts.TLS {
 		var creds credentials.TransportCredentials
-		if globalOpts.CaFile == "" {
-			creds = credentials.NewClientTLSFromCert(nil, "")
-		} else {
-			var err error
-			creds, err = credentials.NewClientTLSFromFile(globalOpts.CaFile, "")
+		tlsConfig := new(tls.Config)
+		if len(globalOpts.CaFile) != 0 {
+			pemCerts, err := os.ReadFile(globalOpts.CaFile)
 			if err != nil {
 				exitWithError(err)
 			}
+			tlsConfig.RootCAs = x509.NewCertPool()
+			if !tlsConfig.RootCAs.AppendCertsFromPEM(pemCerts) {
+				exitWithError(errors.New("no valid CA certificates to load"))
+			}
 		}
+		if len(globalOpts.ClientCertFile) != 0 && len(globalOpts.ClientKeyFile) != 0 {
+			cert, err := loadCertificatePEM(globalOpts.ClientCertFile)
+			if err != nil {
+				exitWithError(fmt.Errorf("failed to load client certificate: %w", err))
+			}
+			key, err := loadKeyPEM(globalOpts.ClientKeyFile)
+			if err != nil {
+				exitWithError(fmt.Errorf("failed to load client key: %w", err))
+			}
+			tlsConfig.Certificates = []tls.Certificate{
+				{
+					Certificate: [][]byte{cert.Raw},
+					PrivateKey:  key,
+				},
+			}
+		}
+		creds = credentials.NewTLS(tlsConfig)
 		grpcOpts = append(grpcOpts, grpc.WithTransportCredentials(creds))
 	} else {
-		grpcOpts = append(grpcOpts, grpc.WithInsecure())
+		grpcOpts = append(grpcOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	target := net.JoinHostPort(globalOpts.Host, strconv.Itoa(globalOpts.Port))
+	target := globalOpts.Target
 	if target == "" {
-		target = ":50051"
+		target = net.JoinHostPort(globalOpts.Host, strconv.Itoa(globalOpts.Port))
+	} else if strings.HasPrefix(target, "unix://") {
+		target = target[len("unix://"):]
+		dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+			return net.Dial("unix", addr)
+		}
+		grpcOpts = append(grpcOpts, grpc.WithContextDialer(dialer))
 	}
-	cc, cancel := context.WithTimeout(ctx, time.Second)
-	conn, err := grpc.DialContext(cc, target, grpcOpts...)
-	if err != nil {
-		return nil, cancel, err
-	}
-	return api.NewGobgpApiClient(conn), cancel, nil
+	return grpc.NewClient(target, grpcOpts...)
 }
 
 func addr2AddressFamily(a net.IP) *api.Family {
@@ -263,6 +365,10 @@ var (
 		Afi:  api.Family_AFI_L2VPN,
 		Safi: api.Family_SAFI_EVPN,
 	}
+	l2vpnVPLS = &api.Family{
+		Afi:  api.Family_AFI_L2VPN,
+		Safi: api.Family_SAFI_VPLS,
+	}
 	ipv4Encap = &api.Family{
 		Afi:  api.Family_AFI_IP,
 		Safi: api.Family_SAFI_ENCAPSULATION,
@@ -303,6 +409,14 @@ var (
 		Afi:  api.Family_AFI_LS,
 		Safi: api.Family_SAFI_LS,
 	}
+	ipv4MUP = &api.Family{
+		Afi:  api.Family_AFI_IP,
+		Safi: api.Family_SAFI_MUP,
+	}
+	ipv6MUP = &api.Family{
+		Afi:  api.Family_AFI_IP6,
+		Safi: api.Family_SAFI_MUP,
+	}
 )
 
 func checkAddressFamily(def *api.Family) (*api.Family, error) {
@@ -323,6 +437,8 @@ func checkAddressFamily(def *api.Family) (*api.Family, error) {
 		f = ipv6MPLS
 	case "evpn":
 		f = evpn
+	case "l2vpn-vpls":
+		f = l2vpnVPLS
 	case "encap", "ipv4-encap":
 		f = ipv4Encap
 	case "ipv6-encap":
@@ -343,6 +459,10 @@ func checkAddressFamily(def *api.Family) (*api.Family, error) {
 		f = opaque
 	case "ls", "linkstate", "bgpls":
 		f = ls
+	case "ipv4-mup", "mup-ipv4", "mup4":
+		f = ipv4MUP
+	case "ipv6-mup", "mup-ipv6", "mup6":
+		f = ipv6MUP
 	case "":
 		f = def
 	default:

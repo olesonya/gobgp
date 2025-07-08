@@ -2,7 +2,7 @@
 
 ## Building the development environment
 
-You need a working [Go environment](https://golang.org/doc/install) (1.11 or newer) with the module support enabled.
+You need a working [Go environment](https://golang.org/doc/install) (1.16 or newer).
 
 ```bash
 $ git clone git://github.com/osrg/gobgp
@@ -10,6 +10,21 @@ $ cd gobgp && go mod download
 ```
 
 Now ready to modify the code and build two binaries, `cmd/gobgp` and `cmd/gobgpd`.
+
+## Testing
+
+Before sending pull request, please make sure that your changes have passed both unit and integration tests. Check out [the tests](https://github.com/osrg/gobgp/blob/master/.github/workflows/ci.yml) triggered by a pull request. If you need to debug the integration tests, it's a good idea to run them [locally](https://github.com/osrg/gobgp/blob/master/test/scenario_test/README.md).
+
+## Changing the gRPC API
+
+To generate gRPC code from Protobuf definitions, first make sure you have [buf](https://github.com/bufbuild/buf) installed.
+
+Then run the following:
+
+```bash
+$ cd proto
+$ buf generate
+```
 
 ## Releases
 
@@ -43,25 +58,29 @@ If you have a non-standard release and want to have more build information there
 
 ```bash
 go build -ldflags \
-	"-X github.com/osrg/gobgp/internal/pkg/version.COMMIT=`git rev-parse --short HEAD` \
-	 -X github.com/osrg/gobgp/internal/pkg/version.METADATA="date.`date "+%Y%m%d"`" \
-	 -X github.com/osrg/gobgp/internal/pkg/version.IDENTIFIER=alpha"
+	"-X github.com/osrg/gobgp/v4/internal/pkg/version.COMMIT=`git rev-parse --short HEAD` \
+	 -X github.com/osrg/gobgp/v4/internal/pkg/version.METADATA="date.`date "+%Y%m%d"`" \
+	 -X github.com/osrg/gobgp/v4/internal/pkg/version.IDENTIFIER=alpha"
 ```
 
 This will produce a version number of
 
-```2.5.0-alpaha+commit.XXXYYYZZ.date.20190526```
+```3.0.0-alpaha+commit.XXXYYYZZ.date.20211209```
 
 ## Layout
 
 The GoBGP project adopts [Standard Go Project Layout](https://github.com/golang-standards/project-layout).
 
-## Changing the gRPC API
+## Fuzzing
 
-If you change the gRPC API, generate `api/gobgp.pb.go` in the following way:
+Run [Go Fuzzing](https://go.dev/security/fuzz)
 
 ```bash
-$ ./tools/grpc/genproto.sh
+go test -fuzz=FuzzParseRTR                      $PWD/pkg/packet/rtr
+go test -fuzz=FuzzParseBMPMessage               $PWD/pkg/packet/bmp
+go test -fuzz=FuzzParseBGPMessage               $PWD/pkg/packet/bgp
+go test -fuzz=FuzzParseLargeCommunity           $PWD/pkg/packet/bgp
+go test -fuzz=FuzzParseFlowSpecComponents       $PWD/pkg/packet/bgp
+go test -fuzz=FuzzMRT                           $PWD/pkg/packet/mrt
+go test -fuzz=FuzzZapi                          $PWD/internal/pkg/zebra
 ```
-
-In order for the script to run, you'll need protoc (version 3.7.1) in your PATH.

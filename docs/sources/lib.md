@@ -15,22 +15,23 @@ import (
 	"context"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
-	"github.com/golang/protobuf/ptypes/any"
-	api "github.com/osrg/gobgp/api"
-	gobgp "github.com/osrg/gobgp/pkg/server"
-	log "github.com/sirupsen/logrus"
+	"github.com/sirupsen/logrus"
+
+	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/log"
+	"github.com/osrg/gobgp/v4/pkg/server"
 )
 
 func main() {
-	log.SetLevel(log.DebugLevel)
-	s := gobgp.NewBgpServer()
+	log	:= logrus.New()
+
+	s := server.NewBgpServer(server.LoggerOption(&myLogger{logger: log}))
 	go s.Serve()
 
 	// global configuration
 	if err := s.StartBgp(context.Background(), &api.StartBgpRequest{
 		Global: &api.Global{
-			As:         65003,
+			Asn:         65003,
 			RouterId:   "10.0.255.254",
 			ListenPort: -1, // gobgp won't listen on tcp:179
 		},
@@ -39,7 +40,11 @@ func main() {
 	}
 
 	// monitor the change of the peer state
-	if err := s.MonitorPeer(context.Background(), &api.MonitorPeerRequest{}, func(p *api.Peer) { log.Info(p) }); err != nil {
+	if err := s.WatchEvent(context.Background(), &api.WatchEventRequest{Peer: &api.WatchEventRequest_Peer{},}, func(r *api.WatchEventResponse, when time.Time) {
+			if p := r.GetPeer(); p != nil && p.Type == api.WatchEventResponse_PeerEvent_TYPE_STATE {
+				log.Info(p)
+			}
+		}); err != nil {
 		log.Fatal(err)
 	}
 
@@ -47,7 +52,7 @@ func main() {
 	n := &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: "172.17.0.2",
-			PeerAs:          65002,
+			PeerAsn:          65002,
 		},
 	}
 
@@ -58,26 +63,26 @@ func main() {
 	}
 
 	// add routes
-	nlri, _ := ptypes.MarshalAny(&api.IPAddressPrefix{
+	nlri := &api.NLRI{Nlri: &api.NLRI_Prefix{Prefix: &api.IPAddressPrefix{
 		Prefix:    "10.0.0.0",
 		PrefixLen: 24,
-	})
+	}}}
 
-	a1, _ := ptypes.MarshalAny(&api.OriginAttribute{
+	a1 := &api.Attribute{Attr: &api.Attribute_Origin{Origin: &api.OriginAttribute{
 		Origin: 0,
-	})
-	a2, _ := ptypes.MarshalAny(&api.NextHopAttribute{
+	}}}
+	a2 := &api.Attribute{Attr: &api.Attribute_NextHop{NextHop: &api.NextHopAttribute{
 		NextHop: "10.0.0.1",
-	})
-	a3, _ := ptypes.MarshalAny(&api.AsPathAttribute{
+	}}}
+	a3 := &api.Attribute{Attr: &api.Attribute_AsPath{AsPath: &api.AsPathAttribute{
 		Segments: []*api.AsSegment{
 			{
 				Type:    2,
 				Numbers: []uint32{6762, 39919, 65000, 35753, 65000},
 			},
 		},
-	})
-	attrs := []*any.Any{a1, a2, a3}
+	}}}
+	attrs := []*api.Attribute{a1, a2, a3}
 
 	_, err := s.AddPath(context.Background(), &api.AddPathRequest{
 		Path: &api.Path{
@@ -96,25 +101,25 @@ func main() {
 	}
 
 	// add v6 route
-	nlri, _ = ptypes.MarshalAny(&api.IPAddressPrefix{
+	nlri = &api.NLRI{Nlri: &api.NLRI_Prefix{Prefix: &api.IPAddressPrefix{
 		PrefixLen: 64,
 		Prefix:    "2001:db8:1::",
-	})
-	v6Attrs, _ := ptypes.MarshalAny(&api.MpReachNLRIAttribute{
+	}}}
+	v6Attrs := &api.Attribute{Attr: &api.Attribute_MpReach{MpReach: &api.MpReachNLRIAttribute{
 		Family:   v6Family,
 		NextHops: []string{"2001:db8::1"},
-		Nlris:    []*any.Any{nlri},
-	})
+		Nlris:    []*api.NLRI{nlri},
+	}}}
 
-	c, _ := ptypes.MarshalAny(&api.CommunitiesAttribute{
+	c := &api.Attribute{Attr: &api.Attribute_Communities{Communities: &api.CommunitiesAttribute{
 		Communities: []uint32{100, 200},
-	})
+	}}}
 
 	_, err = s.AddPath(context.Background(), &api.AddPathRequest{
 		Path: &api.Path{
 			Family: v6Family,
 			Nlri:   nlri,
-			Pattrs: []*any.Any{a1, v6Attrs, c},
+			Pattrs: []*api.Attribute{a1, v6Attrs, c},
 		},
 	})
 	if err != nil {
@@ -127,5 +132,42 @@ func main() {
 
 	// do something useful here instead of exiting
 	time.Sleep(time.Minute * 3)
+}
+
+// implement github.com/osrg/gobgp/v4/pkg/log/Logger interface
+type myLogger struct {
+	logger *logrus.Logger
+}
+
+func (l *myLogger) Panic(msg string, fields log.Fields) {
+	l.logger.WithFields(logrus.Fields(fields)).Panic(msg)
+}
+
+func (l *myLogger) Fatal(msg string, fields log.Fields) {
+	l.logger.WithFields(logrus.Fields(fields)).Fatal(msg)
+}
+
+func (l *myLogger) Error(msg string, fields log.Fields) {
+	l.logger.WithFields(logrus.Fields(fields)).Error(msg)
+}
+
+func (l *myLogger) Warn(msg string, fields log.Fields) {
+	l.logger.WithFields(logrus.Fields(fields)).Warn(msg)
+}
+
+func (l *myLogger) Info(msg string, fields log.Fields) {
+	l.logger.WithFields(logrus.Fields(fields)).Info(msg)
+}
+
+func (l *myLogger) Debug(msg string, fields log.Fields) {
+	l.logger.WithFields(logrus.Fields(fields)).Debug(msg)
+}
+
+func (l *myLogger) SetLevel(level log.LogLevel) {
+	l.logger.SetLevel(logrus.Level(level))
+}
+
+func (l *myLogger) GetLevel() log.LogLevel {
+	return log.LogLevel(l.logger.GetLevel())
 }
 ```

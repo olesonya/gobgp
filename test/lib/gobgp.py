@@ -14,7 +14,6 @@
 # limitations under the License.
 
 
-
 import collections
 import json
 from itertools import chain
@@ -126,7 +125,7 @@ class GoBGPContainer(BGPContainer):
         self._wait_for_boot()
 
     def stop_gobgp(self):
-        self.local("pkill -INT gobgpd")
+        self.local("pkill -KILL gobgpd")
 
     def _start_zebra(self):
         if self.zapi_version == 2:
@@ -358,7 +357,7 @@ class GoBGPContainer(BGPContainer):
     def _merge_dict(self, dct, merge_dct):
         for k, v in merge_dct.items():
             if (k in dct and isinstance(dct[k], dict)
-                    and isinstance(merge_dct[k], collections.Mapping)):
+                    and isinstance(merge_dct[k], collections.abc.Mapping)):
                 self._merge_dict(dct[k], merge_dct[k])
             else:
                 dct[k] = merge_dct[k]
@@ -411,6 +410,10 @@ class GoBGPContainer(BGPContainer):
                 afi_safi_list.append({'config': {'afi-safi-name': 'l3vpn-ipv4-flowspec'}})
                 afi_safi_list.append({'config': {'afi-safi-name': 'ipv6-flowspec'}})
                 afi_safi_list.append({'config': {'afi-safi-name': 'l3vpn-ipv6-flowspec'}})
+
+            if info['mup']:
+                afi_safi_list.append({'config': {'afi-safi-name': 'ipv4-mup'}})
+                afi_safi_list.append({'config': {'afi-safi-name': 'ipv6-mup'}})
 
             neigh_addr = None
             interface = None
@@ -480,9 +483,10 @@ class GoBGPContainer(BGPContainer):
                 n['route-reflector'] = {'config': {'route-reflector-client': True,
                                                    'route-reflector-cluster-id': cluster_id}}
 
-            if info['addpath']:
-                n['add-paths'] = {'config': {'receive': True,
-                                             'send-max': 16}}
+            if info["addpath"] > 0:
+                n["add-paths"] = {
+                    "config": {"receive": True, "send-max": info["addpath"]}
+                }
 
             if len(info.get('default-policy', [])) + len(info.get('policies', [])) > 0:
                 n['apply-policy'] = {'config': {}}
@@ -532,11 +536,11 @@ class GoBGPContainer(BGPContainer):
 
         with open('{0}/gobgpd.conf'.format(self.config_dir), 'w') as f:
             print(yellow('[{0}\'s new gobgpd.conf]'.format(self.name)))
-            if self.config_format is 'toml':
+            if self.config_format == "toml":
                 raw = toml.dumps(config)
-            elif self.config_format is 'yaml':
+            elif self.config_format == "yaml":
                 raw = yaml.dump(config)
-            elif self.config_format is 'json':
+            elif self.config_format == "json":
                 raw = json.dumps(config)
             else:
                 raise Exception('invalid config_format {0}'.format(self.config_format))
@@ -662,11 +666,11 @@ class GoBGPContainer(BGPContainer):
 class RawGoBGPContainer(GoBGPContainer):
     def __init__(self, name, config, ctn_image_name='osrg/gobgp',
                  log_level='debug', zebra=False, config_format='yaml'):
-        if config_format is 'toml':
+        if config_format == "toml":
             d = toml.loads(config)
-        elif config_format is 'yaml':
+        elif config_format == "yaml":
             d = yaml.load(config)
-        elif config_format is 'json':
+        elif config_format == "json":
             d = json.loads(config)
         else:
             raise Exception('invalid config format {0}'.format(config_format))

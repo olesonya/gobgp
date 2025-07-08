@@ -22,12 +22,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osrg/gobgp/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestMrtHdr(t *testing.T) {
-	h1, err := NewMRTHeader(10, TABLE_DUMPv2, RIB_IPV4_MULTICAST, 20)
+	h1, err := NewMRTHeader(time.Unix(10, 0), TABLE_DUMPv2, RIB_IPV4_MULTICAST, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,14 +44,23 @@ func TestMrtHdr(t *testing.T) {
 }
 
 func TestMrtHdrTime(t *testing.T) {
-	h1, err := NewMRTHeader(10, TABLE_DUMPv2, RIB_IPV4_MULTICAST, 20)
+	ttime1 := time.Unix(10, 0)
+	h1, err := NewMRTHeader(ttime1, TABLE_DUMPv2, RIB_IPV4_MULTICAST, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ttime := time.Unix(10, 0)
-	htime := h1.GetTime()
-	t.Logf("this timestamp should be 10s after epoch:%v", htime)
-	assert.Equal(t, h1.GetTime(), ttime)
+	h1time := h1.GetTime()
+	t.Logf("this timestamp should be 10s after epoch:%v", h1time)
+	assert.Equal(t, h1time, ttime1)
+
+	ttime2 := time.Unix(20, 123000)
+	h2, err := NewMRTHeader(ttime2, BGP4MP_ET, STATE_CHANGE, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2time := h2.GetTime()
+	t.Logf("this timestamp should be 20s and 123ms after epoch:%v", h2time)
+	assert.Equal(t, h2time, ttime2)
 }
 
 func testPeer(t *testing.T, p1 *Peer) {
@@ -184,7 +193,7 @@ func TestMrtRib(t *testing.T) {
 		t.Fatal(err)
 	}
 	r2 := &Rib{
-		RouteFamily: bgp.RF_IPv4_UC,
+		Family: bgp.RF_IPv4_UC,
 	}
 	err = r2.DecodeFromBytes(b1)
 	if err != nil {
@@ -218,8 +227,8 @@ func TestMrtRibWithAddPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	r2 := &Rib{
-		RouteFamily: bgp.RF_IPv4_UC,
-		isAddPath:   true,
+		Family:    bgp.RF_IPv4_UC,
+		isAddPath: true,
 	}
 	err = r2.DecodeFromBytes(b1)
 	if err != nil {
@@ -280,10 +289,10 @@ func TestMrtBgp4mpMessage(t *testing.T) {
 func TestMrtSplit(t *testing.T) {
 	var b bytes.Buffer
 	numwrite, numread := 10, 0
-	for i := 0; i < numwrite; i++ {
+	for range numwrite {
 		msg := bgp.NewBGPKeepAliveMessage()
 		m1 := NewBGP4MPMessage(65000, 65001, 1, "192.168.0.1", "192.168.0.2", false, msg)
-		mm, _ := NewMRTMessage(1234, BGP4MP, MESSAGE, m1)
+		mm, _ := NewMRTMessage(time.Unix(1234, 0), BGP4MP, MESSAGE, m1)
 		b1, err := mm.Serialize()
 		if err != nil {
 			t.Fatal(err)
@@ -299,4 +308,56 @@ func TestMrtSplit(t *testing.T) {
 	}
 	t.Logf("scanner scanned %d serialized keepalives from the buffer", numread)
 	assert.Equal(t, numwrite, numread)
+}
+
+//nolint:errcheck
+func FuzzMRT(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) < MRT_COMMON_HEADER_LEN {
+			return
+		}
+
+		hdr := &MRTHeader{}
+		err := hdr.DecodeFromBytes(data[:MRT_COMMON_HEADER_LEN])
+		if err != nil {
+			return
+		}
+
+		ParseMRTBody(hdr, data[MRT_COMMON_HEADER_LEN:])
+	})
+}
+
+// grep -r DecodeFromBytes pkg/packet/mrt/ | grep -e ":func " | perl -pe 's|func \(.* \*(.*?)\).*|(&\1\{\})\.DecodeFromBytes(data)|g' | awk -F ':' '{print $2}'
+//
+//nolint:errcheck
+func FuzzDecodeFromBytes(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		(&MRTHeader{}).DecodeFromBytes(data)
+		(&Peer{}).DecodeFromBytes(data)
+		(&PeerIndexTable{}).DecodeFromBytes(data)
+		(&RibEntry{}).DecodeFromBytes(data)
+		(&RibEntry{isAddPath: true}).DecodeFromBytes(data)
+		(&Rib{}).DecodeFromBytes(data)
+		(&Rib{isAddPath: true}).DecodeFromBytes(data)
+		(&GeoPeer{}).DecodeFromBytes(data)
+		(&GeoPeerTable{}).DecodeFromBytes(data)
+		if len(data) > 12 {
+			h := &BGP4MPHeader{isAS4: true}
+			_, err := h.decodeFromBytes(data[:12])
+			if err != nil {
+				return
+			}
+			(&BGP4MPStateChange{BGP4MPHeader: h}).DecodeFromBytes(data[12:])
+			(&BGP4MPMessage{BGP4MPHeader: h}).DecodeFromBytes(data[12:])
+		}
+		if len(data) > 8 {
+			h := &BGP4MPHeader{isAS4: false}
+			_, err := h.decodeFromBytes(data[:8])
+			if err != nil {
+				return
+			}
+			(&BGP4MPStateChange{BGP4MPHeader: h}).DecodeFromBytes(data[8:])
+			(&BGP4MPMessage{BGP4MPHeader: h}).DecodeFromBytes(data[8:])
+		}
+	})
 }
